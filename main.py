@@ -62,7 +62,7 @@ class CrawlerThread(threading.Thread):
         return None
 
     def scroll_to_load_all(self, driver, scroll_container):
-        """모든 아이템이 로드될 때까지 스크롤"""
+        """모든 아이템이 로드될 때까지 천천히 스크롤"""
         from selenium.webdriver.common.action_chains import ActionChains
         from selenium.webdriver.common.keys import Keys
         
@@ -94,99 +94,107 @@ class CrawlerThread(threading.Thread):
         previous_count = len(initial_items)
         self.status_callback(f"초기 아이템 수: {previous_count}개")
         
-        stable_count = 0
-        max_stable_count = 3
-        scroll_attempt = 0
-        max_scroll_attempts = 20
+        # 전체 스크롤 높이 확인
+        total_height = driver.execute_script("return arguments[0].scrollHeight", scroll_container)
+        current_position = 0
+        scroll_step = 300  # 한 번에 스크롤할 픽셀
         
-        while scroll_attempt < max_scroll_attempts and self.is_running:
-            # 여러 스크롤 방법 시도
-            
-            # 방법 1: scrollIntoView 사용 (마지막 아이템으로)
+        stable_count = 0
+        max_stable_count = 3  # 연속으로 변화가 없을 때 카운트
+        
+        self.status_callback("천천히 스크롤하며 모든 아이템을 로드합니다...")
+        
+        # 메인 스크롤 루프
+        while current_position < total_height and self.is_running:
+            # 점진적 스크롤
             try:
-                last_items = driver.find_elements(By.CSS_SELECTOR, "a.place_bluelink")
-                if last_items:
-                    driver.execute_script("""
-                        arguments[0].scrollIntoView({behavior: 'smooth', block: 'end'});
-                    """, last_items[-1])
-                    time.sleep(1.5)
-            except:
-                pass
-            
-            # 방법 2: 컨테이너 스크롤
-            try:
-                driver.execute_script("""
+                driver.execute_script(f"""
                     var container = arguments[0];
-                    container.scrollTop = container.scrollHeight;
+                    container.scrollTo({{
+                        top: {current_position},
+                        behavior: 'smooth'
+                    }});
                 """, scroll_container)
-                time.sleep(0.5)
-            except:
-                pass
-            
-            # 방법 3: 키보드 스크롤
-            try:
-                driver.execute_script("arguments[0].focus();", scroll_container)
-                scroll_container.send_keys(Keys.END)
-                time.sleep(0.5)
-            except:
-                pass
-            
-            # 방법 4: ActionChains 스크롤
-            try:
-                actions = ActionChains(driver)
-                actions.move_to_element(scroll_container)
-                actions.scroll_by_amount(0, 1000).perform()
-                time.sleep(0.5)
-            except:
-                pass
-            
-            # 방법 5: 강제 스크롤 이벤트
-            try:
-                driver.execute_script("""
-                    var container = arguments[0];
-                    var event = new Event('scroll', { bubbles: true });
-                    container.scrollTop += 1000;
-                    container.dispatchEvent(event);
+                
+                current_position += scroll_step
+                
+                # 스크롤 후 충분한 대기 시간
+                time.sleep(1.5)
+                
+                # 10번 스크롤마다 더 긴 대기 시간
+                if current_position % (scroll_step * 10) == 0:
+                    self.status_callback(f"로딩 대기중... (스크롤 위치: {current_position}/{total_height})")
+                    time.sleep(2)
+                
+                # 새로운 아이템 확인
+                current_items = driver.find_elements(By.CSS_SELECTOR, "a.place_bluelink")
+                if not current_items:
+                    current_items = driver.find_elements(By.CSS_SELECTOR, "li.UEzoS")
+                
+                current_count = len(current_items)
+                
+                # 새로운 아이템이 로드되었는지 확인
+                if current_count > previous_count:
+                    self.status_callback(f"새로운 아이템 {current_count - previous_count}개 발견 (총 {current_count}개)")
+                    previous_count = current_count
+                    stable_count = 0
                     
-                    // wheel 이벤트도 발생
-                    var wheelEvent = new WheelEvent('wheel', {
-                        deltaY: 1000,
-                        bubbles: true
-                    });
-                    container.dispatchEvent(wheelEvent);
-                """, scroll_container)
-                time.sleep(0.5)
-            except:
+                    # 새 아이템이 로드되면 전체 높이 다시 확인
+                    total_height = driver.execute_script("return arguments[0].scrollHeight", scroll_container)
+                else:
+                    stable_count += 1
+                    
+            except Exception as e:
+                self.status_callback(f"스크롤 중 오류: {e}")
                 pass
-            
-            # 새로운 아이템 확인
-            time.sleep(1)  # 로딩 대기
-            
-            current_items = driver.find_elements(By.CSS_SELECTOR, "a.place_bluelink")
-            if not current_items:
-                current_items = driver.find_elements(By.CSS_SELECTOR, "li.UEzoS")
-            
-            current_count = len(current_items)
-            
-            self.status_callback(f"스크롤 {scroll_attempt + 1}회: {current_count}개 아이템")
-            
-            # 변화 확인
-            if current_count > previous_count:
-                self.status_callback(f"새로운 아이템 {current_count - previous_count}개 로드됨")
-                previous_count = current_count
-                stable_count = 0
-            else:
-                stable_count += 1
-                if stable_count >= max_stable_count:
-                    self.status_callback(f"더 이상 새로운 아이템이 로드되지 않음. 스크롤 완료.")
-                    break
-            
-            scroll_attempt += 1
-            
-            # 충분히 로드되었으면 종료
-            if current_count >= 50:
-                self.status_callback(f"충분한 아이템({current_count}개)이 로드됨. 스크롤 종료.")
-                break
+        
+        # 추가 스크롤 - 끝까지 5번 더 시도
+        self.status_callback("추가 스크롤로 놓친 아이템 확인 중...")
+        extra_scroll_count = 0
+        max_extra_scrolls = 5
+        
+        while extra_scroll_count < max_extra_scrolls and self.is_running:
+            try:
+                # 현재 스크롤 위치 확인
+                current_scroll = driver.execute_script("return arguments[0].scrollTop", scroll_container)
+                
+                # 끝까지 스크롤
+                driver.execute_script("""
+                    var container = arguments[0];
+                    container.scrollTo({
+                        top: container.scrollHeight,
+                        behavior: 'smooth'
+                    });
+                """, scroll_container)
+                time.sleep(2)
+                
+                # 새로운 스크롤 위치 확인
+                new_scroll = driver.execute_script("return arguments[0].scrollTop", scroll_container)
+                
+                # 스크롤이 더 이상 안 움직이면
+                if current_scroll == new_scroll:
+                    self.status_callback(f"추가 스크롤 {extra_scroll_count + 1}회 - 더 이상 스크롤 불가")
+                else:
+                    self.status_callback(f"추가 스크롤 {extra_scroll_count + 1}회 진행")
+                
+                # 아이템 수 확인
+                current_items = driver.find_elements(By.CSS_SELECTOR, "a.place_bluelink")
+                if not current_items:
+                    current_items = driver.find_elements(By.CSS_SELECTOR, "li.UEzoS")
+                
+                current_count = len(current_items)
+                
+                if current_count > previous_count:
+                    self.status_callback(f"추가 스크롤에서 {current_count - previous_count}개 더 발견! (총 {current_count}개)")
+                    previous_count = current_count
+                    # 새로운 아이템을 발견하면 추가 스크롤 카운트 리셋
+                    extra_scroll_count = 0
+                else:
+                    extra_scroll_count += 1
+                    
+            except Exception as e:
+                self.status_callback(f"추가 스크롤 중 오류: {e}")
+                extra_scroll_count += 1
         
         # 스크롤을 맨 위로
         try:
@@ -194,14 +202,14 @@ class CrawlerThread(threading.Thread):
         except:
             driver.execute_script("window.scrollTo(0, 0);")
         
-        time.sleep(0.5)
+        time.sleep(1)  # 스크롤 복귀 대기
         
         # 최종 아이템 수 반환
         final_items = driver.find_elements(By.CSS_SELECTOR, "a.place_bluelink")
         if not final_items:
             final_items = driver.find_elements(By.CSS_SELECTOR, "li.UEzoS")
         
-        self.status_callback(f"최종 로드된 아이템: {len(final_items)}개")
+        self.status_callback(f"스크롤 완료. 최종 로드된 아이템: {len(final_items)}개")
         return len(final_items)
 
     def run(self):
@@ -551,7 +559,7 @@ class CrawlerThread(threading.Thread):
 class NaverMapCrawlerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Naver Map Crawler v2.0 - Final")
+        self.root.title("Naver Map Crawler v2.0.1 - Final")
         self.root.geometry("700x300")
         
         # 스타일 설정
@@ -598,7 +606,7 @@ class NaverMapCrawlerApp:
         self.status_bar.grid(row=3, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(20, 0))
         
         # By 라벨
-        by_label = ttk.Label(main_frame, text="By ANYCODER | v2.0 Final", foreground='gray')
+        by_label = ttk.Label(main_frame, text="By ANYCODER | v2.0.1 Final", foreground='gray')
         by_label.grid(row=4, column=0, columnspan=3, pady=(10, 0))
         
     def start_crawling(self):
