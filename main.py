@@ -8,7 +8,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException, StaleElementReferenceException
 from selenium.webdriver.common.action_chains import ActionChains
 import openpyxl
 import re
@@ -24,331 +24,525 @@ class CrawlerThread(threading.Thread):
         self.is_running = True
         self.daemon = True
 
+    def find_next_page_button(self, driver):
+        """다음 페이지 버튼을 정확히 찾는 함수"""
+        # 여러 선택자 시도
+        selectors = ["a.eUTV2", "a._2PoiJ", "a[class*='page']", "button[class*='next']"]
+        
+        for selector in selectors:
+            try:
+                buttons = driver.find_elements(By.CSS_SELECTOR, selector)
+                
+                for button in buttons:
+                    # aria-disabled 확인
+                    if button.get_attribute("aria-disabled") == "true":
+                        continue
+                    
+                    # SVG path로 다음 버튼인지 확인
+                    try:
+                        svg_element = button.find_element(By.TAG_NAME, "svg")
+                        path_element = svg_element.find_element(By.TAG_NAME, "path")
+                        d_attribute = path_element.get_attribute("d")
+                        
+                        # 다음 페이지 화살표 패턴 확인 (오른쪽 화살표)
+                        if d_attribute and any(pattern in d_attribute for pattern in ["M12", "M14", "M10.524"]):
+                            # 이전 버튼 패턴 제외
+                            if not any(pattern in d_attribute for pattern in ["M8", "M6", "M13.476"]):
+                                self.status_callback(f"다음 페이지 버튼 찾음: {selector}")
+                                return button
+                                
+                    except:
+                        # SVG가 없으면 텍스트나 다른 방법으로 확인
+                        button_text = button.text.strip()
+                        if "다음" in button_text or ">" in button_text:
+                            return button
+            except:
+                continue
+                
+        return None
+
+    def scroll_to_load_all(self, driver, scroll_container):
+        """모든 아이템이 로드될 때까지 스크롤"""
+        from selenium.webdriver.common.action_chains import ActionChains
+        from selenium.webdriver.common.keys import Keys
+        
+        # 스크롤 가능한 요소 자동 탐지
+        if not scroll_container:
+            script = """
+            var elements = document.querySelectorAll('div[class*="scroll"], div[id*="scroll"], div[role="main"]');
+            for (var i = 0; i < elements.length; i++) {
+                if (elements[i].scrollHeight > elements[i].clientHeight) {
+                    return elements[i];
+                }
+            }
+            return null;
+            """
+            scroll_container = driver.execute_script(script)
+            
+            if scroll_container:
+                self.status_callback("JavaScript로 스크롤 컨테이너 찾음")
+            else:
+                # iframe body를 스크롤 컨테이너로 사용
+                scroll_container = driver.find_element(By.TAG_NAME, "body")
+                self.status_callback("body를 스크롤 컨테이너로 사용")
+        
+        # 초기 상태 확인
+        initial_items = driver.find_elements(By.CSS_SELECTOR, "a.place_bluelink")
+        if not initial_items:
+            initial_items = driver.find_elements(By.CSS_SELECTOR, "li.UEzoS")
+        
+        previous_count = len(initial_items)
+        self.status_callback(f"초기 아이템 수: {previous_count}개")
+        
+        stable_count = 0
+        max_stable_count = 3
+        scroll_attempt = 0
+        max_scroll_attempts = 20
+        
+        while scroll_attempt < max_scroll_attempts and self.is_running:
+            # 여러 스크롤 방법 시도
+            
+            # 방법 1: scrollIntoView 사용 (마지막 아이템으로)
+            try:
+                last_items = driver.find_elements(By.CSS_SELECTOR, "a.place_bluelink")
+                if last_items:
+                    driver.execute_script("""
+                        arguments[0].scrollIntoView({behavior: 'smooth', block: 'end'});
+                    """, last_items[-1])
+                    time.sleep(1.5)
+            except:
+                pass
+            
+            # 방법 2: 컨테이너 스크롤
+            try:
+                driver.execute_script("""
+                    var container = arguments[0];
+                    container.scrollTop = container.scrollHeight;
+                """, scroll_container)
+                time.sleep(0.5)
+            except:
+                pass
+            
+            # 방법 3: 키보드 스크롤
+            try:
+                driver.execute_script("arguments[0].focus();", scroll_container)
+                scroll_container.send_keys(Keys.END)
+                time.sleep(0.5)
+            except:
+                pass
+            
+            # 방법 4: ActionChains 스크롤
+            try:
+                actions = ActionChains(driver)
+                actions.move_to_element(scroll_container)
+                actions.scroll_by_amount(0, 1000).perform()
+                time.sleep(0.5)
+            except:
+                pass
+            
+            # 방법 5: 강제 스크롤 이벤트
+            try:
+                driver.execute_script("""
+                    var container = arguments[0];
+                    var event = new Event('scroll', { bubbles: true });
+                    container.scrollTop += 1000;
+                    container.dispatchEvent(event);
+                    
+                    // wheel 이벤트도 발생
+                    var wheelEvent = new WheelEvent('wheel', {
+                        deltaY: 1000,
+                        bubbles: true
+                    });
+                    container.dispatchEvent(wheelEvent);
+                """, scroll_container)
+                time.sleep(0.5)
+            except:
+                pass
+            
+            # 새로운 아이템 확인
+            time.sleep(1)  # 로딩 대기
+            
+            current_items = driver.find_elements(By.CSS_SELECTOR, "a.place_bluelink")
+            if not current_items:
+                current_items = driver.find_elements(By.CSS_SELECTOR, "li.UEzoS")
+            
+            current_count = len(current_items)
+            
+            self.status_callback(f"스크롤 {scroll_attempt + 1}회: {current_count}개 아이템")
+            
+            # 변화 확인
+            if current_count > previous_count:
+                self.status_callback(f"새로운 아이템 {current_count - previous_count}개 로드됨")
+                previous_count = current_count
+                stable_count = 0
+            else:
+                stable_count += 1
+                if stable_count >= max_stable_count:
+                    self.status_callback(f"더 이상 새로운 아이템이 로드되지 않음. 스크롤 완료.")
+                    break
+            
+            scroll_attempt += 1
+            
+            # 충분히 로드되었으면 종료
+            if current_count >= 50:
+                self.status_callback(f"충분한 아이템({current_count}개)이 로드됨. 스크롤 종료.")
+                break
+        
+        # 스크롤을 맨 위로
+        try:
+            driver.execute_script("arguments[0].scrollTop = 0", scroll_container)
+        except:
+            driver.execute_script("window.scrollTo(0, 0);")
+        
+        time.sleep(0.5)
+        
+        # 최종 아이템 수 반환
+        final_items = driver.find_elements(By.CSS_SELECTOR, "a.place_bluelink")
+        if not final_items:
+            final_items = driver.find_elements(By.CSS_SELECTOR, "li.UEzoS")
+        
+        self.status_callback(f"최종 로드된 아이템: {len(final_items)}개")
+        return len(final_items)
+
     def run(self):
         data = []
+        collected_count = 0
         self.status_callback(f"'{self.keyword}' 검색을 시작합니다... (최대 {self.max_count}개 수집)")
         driver = None
-        
+
         try:
             options = webdriver.ChromeOptions()
-            # options.add_argument("--headless")
+            # options.add_argument("--headless") # Keep this commented for debugging
             options.add_argument("--log-level=3")
             options.add_argument("--disable-blink-features=AutomationControlled")
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
             options.add_experimental_option('useAutomationExtension', False)
             driver = webdriver.Chrome(options=options)
-            
-            # URL 기반으로 직접 검색 (URL 인코딩)
+
             encoded_keyword = quote(self.keyword)
             search_url = f"https://map.naver.com/p/search/{encoded_keyword}"
             driver.get(search_url)
-            
-            # 페이지 로드 대기
             time.sleep(3)
 
-            # searchIframe으로 전환
             WebDriverWait(driver, 20).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "searchIframe")))
             time.sleep(2)
 
-            # 스크롤 다운
-            try:
+            current_page = 1
+            max_pages_to_check = 20 # Limit to prevent infinite loops on pagination issues
+
+            while self.is_running and collected_count < self.max_count and current_page <= max_pages_to_check:
+                self.status_callback(f"\n===== {current_page} 페이지 크롤링 시작 =====")
+
+                # Scroll to load all elements on the current page
                 scroll_container = None
-                for selector in ["._3_h-N._1tF3S", "._3_h-N", ".scroll_area"]:
-                    try:
-                        scroll_container = driver.find_element(By.CSS_SELECTOR, selector)
-                        break
-                    except NoSuchElementException:
-                        continue
+                scroll_selectors = [
+                    "div#_list_scroll_container",  # 가장 정확한 선택자
+                    "div._2ky45",  # 대안 1
+                    "div[class*='scroll_area']",  # 대안 2
+                    "div[role='main']",  # 대안 3
+                    "div.Ryr1F",  # 대안 4
+                    "#searchIframe"  # iframe 자체
+                ]
                 
-                if scroll_container:
-                    last_height = driver.execute_script("return arguments[0].scrollHeight", scroll_container)
-                    scroll_count = 0
-                    max_scrolls = 10
-                    
-                    while self.is_running and scroll_count < max_scrolls:
-                        self.status_callback(f"결과 목록을 스크롤합니다... ({scroll_count + 1}/{max_scrolls})")
-                        driver.execute_script("arguments[0].scrollTo(0, arguments[0].scrollHeight);", scroll_container)
-                        time.sleep(2)
-                        new_height = driver.execute_script("return arguments[0].scrollHeight", scroll_container)
-                        if new_height == last_height:
-                            break
-                        last_height = new_height
-                        scroll_count += 1
-                else:
-                    self.status_callback("스크롤 컨테이너를 찾을 수 없습니다. 현재 보이는 결과만 수집합니다.")
-            except Exception as e:
-                self.status_callback(f"스크롤 중 오류: {str(e)}")
-
-            # 모든 장소 링크 찾기
-            time.sleep(2)
-            place_elements = []
-            selectors = [
-                "a.place_bluelink",
-                "a[class*='place_bluelink']",
-                ".place_bluelink",
-                "span.YwYLL",
-                "a[role='button']",
-                ".VLTHu.OW9LQ"
-            ]
-            
-            for selector in selectors:
-                try:
-                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                    if elements:
-                        self.status_callback(f"{len(elements)}개의 요소를 찾았습니다. (선택자: {selector})")
-                        if selector == "span.YwYLL":
-                            place_elements = []
-                            for elem in elements:
-                                try:
-                                    parent = elem.find_element(By.XPATH, "./ancestor::a[@role='button']")
-                                    place_elements.append(parent)
-                                except:
-                                    try:
-                                        parent = elem.find_element(By.XPATH, "./ancestor::a")
-                                        place_elements.append(parent)
-                                    except:
-                                        pass
+                for selector in scroll_selectors:
+                    try:
+                        if selector == "#searchIframe":
+                            # iframe 자체를 스크롤하는 경우
+                            scroll_container = driver.find_element(By.TAG_NAME, "body")
                         else:
-                            place_elements = elements
-                        break
-                except NoSuchElementException:
-                    continue
-            
-            if not place_elements:
-                self.status_callback("클릭 가능한 장소를 찾을 수 없습니다.")
-                self.callback(data)
-                return
-
-            # 최대 갯수만큼만 처리
-            total_to_process = min(len(place_elements), self.max_count)
-            self.status_callback(f"{len(place_elements)}개의 장소를 찾았습니다. {total_to_process}개의 정보를 수집합니다.")
-
-            # 각 장소 클릭하여 정보 추출
-            collected_count = 0
-            for i in range(total_to_process):
-                if not self.is_running:
-                    break
-                
-                try:
-                    # 매번 요소 다시 찾기
-                    driver.switch_to.default_content()
-                    WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "searchIframe")))
-                    time.sleep(1)
-                    
-                    # 현재 인덱스의 요소 다시 찾기
-                    current_elements = []
-                    for selector in selectors:
-                        try:
-                            elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                            if elements and len(elements) > i:
-                                if selector == "span.YwYLL":
-                                    try:
-                                        parent = elements[i].find_element(By.XPATH, "./ancestor::a[@role='button']")
-                                        current_elements = [parent]
-                                    except:
-                                        try:
-                                            parent = elements[i].find_element(By.XPATH, "./ancestor::a")
-                                            current_elements = [parent]
-                                        except:
-                                            continue
-                                else:
-                                    current_elements = [elements[i]]
+                            scroll_container = driver.find_element(By.CSS_SELECTOR, selector)
+                        
+                        if scroll_container:
+                            # 스크롤 가능한지 확인
+                            scroll_height = driver.execute_script("return arguments[0].scrollHeight", scroll_container)
+                            client_height = driver.execute_script("return arguments[0].clientHeight", scroll_container)
+                            
+                            if scroll_height > client_height:
+                                self.status_callback(f"스크롤 컨테이너 찾음: {selector}")
                                 break
-                        except:
-                            continue
-                    
-                    if not current_elements:
-                        continue
-                    
-                    element = current_elements[0]
-                    
-                    # 스크롤
-                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-                    time.sleep(1)
-                    
-                    # 클릭
-                    clicked = False
-                    try:
-                        driver.execute_script("arguments[0].click();", element)
-                        clicked = True
                     except:
-                        pass
-                    
-                    if not clicked:
-                        try:
-                            actions = ActionChains(driver)
-                            actions.move_to_element(element).click().perform()
-                            clicked = True
-                        except:
-                            pass
-                    
-                    if not clicked:
-                        try:
-                            element.click()
-                            clicked = True
-                        except:
-                            pass
-                    
-                    if not clicked:
-                        self.status_callback(f"({i + 1}번째 항목 클릭 실패)")
                         continue
-                    
-                    time.sleep(2)
-                    
-                    # entryIframe으로 전환
-                    driver.switch_to.default_content()
-                    
+
+                if not scroll_container:
+                    self.status_callback("스크롤 컨테이너를 찾을 수 없음 (body 스크롤 사용)")
+                    scroll_container = driver.find_element(By.TAG_NAME, "body")
+
+                # 모든 아이템 로드
+                self.scroll_to_load_all(driver, scroll_container)
+
+                # Get all place elements on the current page after scrolling
+                all_place_elements = []
+                # 여러 선택자 시도
+                place_selectors = [
+                    "a.place_bluelink",  # 최신 선택자 - 클릭 가능한 링크
+                    "li.UEzoS.rTjJo",  # 리스트 아이템
+                    "li._1EKsQ._12tNp",  # 대안 1
+                    "li.UEzoS",  # 기존 선택자
+                    "a[class*='place_bluelink']"  # 부분 매칭
+                ]
+                
+                for selector in place_selectors:
                     try:
-                        WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "entryIframe")))
-                        time.sleep(1)
-                        
-                        # 정보 추출
-                        name = "정보 없음"
-                        road_address = "정보 없음"
-                        jibun_address = "정보 없음"
-                        phone = "정보 없음"
-                        
-                        # 이름 추출
-                        name_selectors = [".YwYLL", ".GHAhO", "span.YwYLL", "h2.YwYLL"]
-                        for sel in name_selectors:
-                            try:
-                                name_elem = WebDriverWait(driver, 3).until(
-                                    EC.presence_of_element_located((By.CSS_SELECTOR, sel))
-                                )
-                                name = name_elem.text.strip()
-                                name = name.replace('복사', '').strip()
-                                if name:
-                                    break
-                            except:
-                                continue
-                        
-                        # 주소 추출
-                        address_button_clicked = False
+                        all_place_elements = WebDriverWait(driver, 5).until(
+                            EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector))
+                        )
+                        if all_place_elements:
+                            self.status_callback(f"장소 요소 찾음: {selector} ({len(all_place_elements)}개)")
+                            break
+                    except TimeoutException:
+                        continue
+                    except Exception as e:
+                        continue
+                
+                if not all_place_elements:
+                    self.status_callback(f"{current_page} 페이지에서 장소를 찾을 수 없습니다.")
+                    # If no elements found, try to move to next page
+                    pass
+
+                if not all_place_elements:
+                    self.status_callback(f"{current_page} 페이지에 크롤링할 장소가 없습니다. 다음 페이지로 이동 시도.")
+                    pass_to_next_page = True
+                else:
+                    pass_to_next_page = False
+                    self.status_callback(f"{current_page} 페이지에서 총 {len(all_place_elements)}개의 장소를 찾았습니다.")
+
+                    # Iterate through each place element and crawl its details
+                    for i, element in enumerate(all_place_elements):
+                        if not self.is_running or collected_count >= self.max_count:
+                            break
+
+                        place_name_for_log = "알 수 없는 장소"
                         try:
-                            address_button = driver.find_element(By.CSS_SELECTOR, "a.PkgBl")
-                            driver.execute_script("arguments[0].click();", address_button)
-                            time.sleep(1)
-                            address_button_clicked = True
-                        except:
-                            pass
-                        
-                        if address_button_clicked:
-                            try:
-                                address_divs = driver.find_elements(By.CSS_SELECTOR, "div.nQ7Lh")
-                                
-                                for div in address_divs:
-                                    try:
-                                        address_text = div.text.strip()
-                                        address_text = address_text.replace('복사', '').replace('도로명', '').replace('지번', '').strip()
-                                        
-                                        if ('로' in address_text or '길' in address_text) and road_address == "정보 없음":
-                                            road_address = address_text
-                                        elif ('동' in address_text or '리' in address_text or re.search(r'\d+-\d+', address_text)) and jibun_address == "정보 없음":
-                                            jibun_address = address_text
-                                    except:
-                                        continue
-                                
-                                if road_address == "정보 없음" and jibun_address == "정보 없음":
-                                    try:
-                                        address_container = driver.find_element(By.CSS_SELECTOR, ".Y31Sf")
-                                        full_text = address_container.text.strip()
-                                        full_text = full_text.replace('복사', '').replace('도로명', '').replace('지번', '').strip()
-                                        if full_text:
-                                            lines = full_text.split('\n')
-                                            if lines:
-                                                road_address = lines[0]
-                                    except:
-                                        pass
-                            except Exception as e:
-                                self.status_callback(f"주소 상세 정보 추출 중 오류: {str(e)}")
-                        
-                        # 주소 버튼 클릭이 안 된 경우
-                        if road_address == "정보 없음" and jibun_address == "정보 없음":
-                            address_selectors = [".PkgBl", ".Y31Sf", "span.PkgBl", ".address", ".LDgIH"]
-                            for sel in address_selectors:
+                            # a.place_bluelink를 직접 클릭하는 경우
+                            if element.tag_name == 'a':
+                                element_to_click = element
                                 try:
-                                    address_elem = driver.find_element(By.CSS_SELECTOR, sel)
-                                    address_text = address_elem.text.strip()
-                                    address_text = address_text.replace('복사', '').replace('도로명', '').replace('지번', '').strip()
-                                    if address_text:
-                                        if '/' in address_text:
-                                            parts = address_text.split('/')
-                                            road_address = parts[0].strip()
-                                            if len(parts) > 1:
-                                                jibun_address = parts[1].strip()
-                                        else:
-                                            road_address = address_text
+                                    name_span = element.find_element(By.CSS_SELECTOR, "span.YwYLL")
+                                    place_name_for_log = name_span.text.strip()
+                                except:
+                                    pass
+                            else:
+                                # li 요소인 경우 내부의 a.place_bluelink 찾기
+                                element_to_click = element.find_element(By.CSS_SELECTOR, "a.place_bluelink")
+                                try:
+                                    name_span = element_to_click.find_element(By.CSS_SELECTOR, "span.YwYLL")
+                                    place_name_for_log = name_span.text.strip()
+                                except:
+                                    pass
+
+                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element_to_click)
+                            time.sleep(0.5)
+                            driver.execute_script("arguments[0].click();", element_to_click)
+                            time.sleep(2)
+
+                            driver.switch_to.default_content()
+                            WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "entryIframe")))
+                            time.sleep(1)
+
+                            name, road_address, jibun_address, phone = "정보 없음", "정보 없음", "정보 없음", "정보 없음"
+
+                            # 장소명 - 여러 선택자 시도
+                            name_selectors = [".YwYLL", "._3Apjo", ".GHAhO", "h2", "[class*='title']"]
+                            for selector in name_selectors:
+                                try:
+                                    name_elem = WebDriverWait(driver, 3).until(
+                                        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                                    )
+                                    name = name_elem.text.strip().replace('복사', '').strip()
+                                    if name and name != "정보 없음":
                                         break
                                 except:
                                     continue
-                        
-                        # 전화번호 추출
-                        phone_button_selectors = [".BfF3H", ".U7pYf", "button[aria-label*='전화']"]
-                        for sel in phone_button_selectors:
-                            try:
-                                phone_button = driver.find_element(By.CSS_SELECTOR, sel)
-                                driver.execute_script("arguments[0].click();", phone_button)
-                                time.sleep(1)
-                                break
-                            except:
-                                continue
-                        
-                        phone_selectors = [".J7eF_", ".xlx7Q", ".RiCN3", "span.xlx7Q", "a[href^='tel:']"]
-                        for sel in phone_selectors:
-                            try:
-                                phone_elem = driver.find_element(By.CSS_SELECTOR, sel)
-                                phone_text = phone_elem.text.strip()
-                                if phone_text and re.search(r'\d{2,}', phone_text):
-                                    phone_text = phone_text.replace('복사', '').replace('휴대전화번호', '').replace('전화번호', '').replace('전화', '').strip()
-                                    phone_text = ' '.join(phone_text.split())
-                                    phone = phone_text
-                                    break
-                                if sel == "a[href^='tel:']":
-                                    href = phone_elem.get_attribute('href')
-                                    if href:
-                                        phone = href.replace('tel:', '').strip()
-                                        break
-                            except:
-                                continue
-                        
-                        if name != "정보 없음":
-                            # 최종 정제
-                            if road_address != "정보 없음":
-                                road_address = road_address.replace('도로명', '').replace('복사', '').replace('주소', '').strip()
-                                road_address = road_address.strip('[](){}|').strip()
-                            if jibun_address != "정보 없음":
-                                jibun_address = jibun_address.replace('지번', '').replace('복사', '').replace('주소', '').strip()
-                                jibun_address = jibun_address.strip('[](){}|').strip()
-                            if phone != "정보 없음":
-                                phone = phone.replace('휴대전화번호', '').replace('전화번호', '').replace('전화', '').replace('복사', '').replace('연락처', '').strip()
-                                phone = phone.strip('[](){}|').strip()
-                                phone = ' '.join(phone.split())
-                            
-                            data.append([name, road_address, jibun_address, phone])
-                            collected_count += 1
-                            self.status_callback(f"({collected_count}/{total_to_process}) {name} 정보 수집 완료")
-                            
-                            if collected_count >= self.max_count:
-                                self.status_callback(f"목표 수집 갯수({self.max_count}개)에 도달했습니다.")
-                                break
-                        
-                    except TimeoutException:
-                        self.status_callback(f"({i + 1}/{total_to_process}번째 항목에서 상세 정보를 찾을 수 없음)")
-                    except Exception as e:
-                        self.status_callback(f"({i + 1}/{total_to_process}번째 항목 처리 중 오류: {str(e)}")
-                    
-                except Exception as e:
-                    self.status_callback(f"항목 처리 중 오류: {str(e)}")
-                    continue
 
-            self.status_callback(f"크롤링 완료. 총 {collected_count}개의 정보를 수집했습니다.")
+                            # 주소 - PkgBl 버튼 클릭해서 지번주소 가져오기
+                            try:
+                                # 먼저 도로명 주소 가져오기
+                                road_address_elem = driver.find_element(By.CSS_SELECTOR, ".LDgIH")
+                                road_address = road_address_elem.text.strip().replace('복사', '').strip()
+                                
+                                # PkgBl 버튼 클릭해서 지번주소 메뉴 열기
+                                try:
+                                    address_button = driver.find_element(By.CSS_SELECTOR, "a.PkgBl")
+                                    driver.execute_script("arguments[0].click();", address_button)
+                                    time.sleep(0.5)
+                                    
+                                    # nQ7Lh 클래스에서 지번주소 찾기
+                                    address_items = driver.find_elements(By.CSS_SELECTOR, ".nQ7Lh")
+                                    for item in address_items:
+                                        item_text = item.text.strip()
+                                        if "지번" in item_text:
+                                            # "지번"과 "복사" 문구 제거
+                                            jibun_address = item_text.replace("지번", "").replace("복사", "").strip()
+                                            break
+                                except:
+                                    # 버튼 클릭 실패시 기존 방식으로 시도
+                                    address_selectors = [".LDgIH", "._2yqUQ", "span[class*='addr']"]
+                                    for selector in address_selectors:
+                                        try:
+                                            address_elems = driver.find_elements(By.CSS_SELECTOR, selector)
+                                            if len(address_elems) > 1:
+                                                jibun_address = address_elems[1].text.strip().replace('복사', '').strip()
+                                                break
+                                        except:
+                                            continue
+                            except Exception as e:
+                                self.status_callback(f"주소 가져오기 오류: {e}")
+
+                            # 전화번호 - 여러 선택자 시도
+                            phone_selectors = [".xlx7Q", "._3ZA58 span", ".dry01", ".J7eF_", "span[class*='phone']", "[class*='tel']"]
+                            phone_found = False
+                            
+                            for selector in phone_selectors:
+                                try:
+                                    phone_elems = driver.find_elements(By.CSS_SELECTOR, selector)
+                                    if phone_elems:
+                                        phone_text = phone_elems[0].text.strip()
+                                        # "휴대전화번호"와 "복사" 문구 제거
+                                        phone_text = phone_text.replace("휴대전화번호", "").replace("복사", "").strip()
+                                        # 전화번호 형식 확인 (숫자와 하이픈 포함)
+                                        if any(char.isdigit() for char in phone_text):
+                                            phone = phone_text
+                                            phone_found = True
+                                            break
+                                except:
+                                    continue
+                            
+                            # 전화번호를 못 찾았으면 "전화번호 보기" 버튼 클릭
+                            if not phone_found:
+                                try:
+                                    # 전화번호 보기 버튼 찾기
+                                    phone_button = driver.find_element(By.CSS_SELECTOR, "a.BfF3H")
+                                    if "전화번호 보기" in phone_button.text:
+                                        self.status_callback("전화번호 보기 버튼 클릭")
+                                        driver.execute_script("arguments[0].click();", phone_button)
+                                        time.sleep(0.5)
+                                        
+                                        # 클릭 후 전화번호 찾기
+                                        try:
+                                            phone_elem = driver.find_element(By.CSS_SELECTOR, ".J7eF_")
+                                            phone_text = phone_elem.text.strip()
+                                            # "휴대전화번호"와 "복사" 문구 제거
+                                            phone = phone_text.replace("휴대전화번호", "").replace("복사", "").strip()
+                                            if not any(char.isdigit() for char in phone):
+                                                phone = "정보 없음"
+                                        except:
+                                            # 다른 선택자들도 시도
+                                            for selector in phone_selectors:
+                                                try:
+                                                    phone_elems = driver.find_elements(By.CSS_SELECTOR, selector)
+                                                    if phone_elems:
+                                                        phone_text = phone_elems[0].text.strip()
+                                                        # "휴대전화번호"와 "복사" 문구 제거
+                                                        phone_text = phone_text.replace("휴대전화번호", "").replace("복사", "").strip()
+                                                        if any(char.isdigit() for char in phone_text):
+                                                            phone = phone_text
+                                                            break
+                                                except:
+                                                    continue
+                                except Exception as e:
+                                    self.status_callback(f"전화번호 보기 버튼 처리 중 오류: {e}")
+
+                            if name != "정보 없음":
+                                data.append([name, road_address, jibun_address, phone])
+                                collected_count += 1
+                                self.status_callback(f"({collected_count}/{self.max_count}) {name} 정보 수집 완료")
+                            else:
+                                self.status_callback(f"장소 이름(YwYLL)을 찾을 수 없어 정보 수집 건너뜀.")
+
+                        except StaleElementReferenceException:
+                            self.status_callback(f"StaleElementReferenceException 발생. '{place_name_for_log}' 건너뜀")
+                            continue
+                        except Exception as e:
+                            self.status_callback(f"장소 '{place_name_for_log}' 처리 중 오류: {str(e)}")
+                            continue
+                        finally:
+                            # Always switch back to searchIframe for the next iteration
+                            driver.switch_to.default_content()
+                            WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "searchIframe")))
+                            time.sleep(0.5)
+
+                if collected_count >= self.max_count:
+                    self.status_callback(f"목표 개수({self.max_count}개)를 모두 수집하여 크롤링을 종료합니다.")
+                    break
+
+                # Move to the next page - 개선된 로직
+                try:
+                    driver.switch_to.default_content()
+                    WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "searchIframe")))
+                    
+                    # 페이지네이션 컨테이너로 스크롤
+                    try:
+                        pagination_container = WebDriverWait(driver, 5).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, "div.zRM9F"))
+                        )
+                        driver.execute_script("arguments[0].scrollIntoView(true);", pagination_container)
+                        time.sleep(0.5)
+                    except:
+                        self.status_callback("페이지네이션 컨테이너를 찾을 수 없음")
+                    
+                    # 다음 페이지 버튼 찾기
+                    next_button = self.find_next_page_button(driver)
+                    
+                    if next_button:
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_button)
+                        time.sleep(0.3)
+                        driver.execute_script("arguments[0].click();", next_button)
+                        self.status_callback(f"\n{current_page + 1} 페이지로 이동합니다.")
+                        current_page += 1
+                        time.sleep(3)
+                        
+                        # 새 페이지 로드 확인
+                        try:
+                            WebDriverWait(driver, 5).until(
+                                lambda d: len(d.find_elements(By.CSS_SELECTOR, "a.place_bluelink")) > 0
+                            )
+                        except:
+                            self.status_callback("새 페이지 로드 대기 중...")
+                    else:
+                        # 페이지 번호로 직접 이동 시도
+                        try:
+                            current_page_elem = driver.find_element(By.CSS_SELECTOR, "a[aria-current='true']")
+                            current_num = int(current_page_elem.text.strip())
+                            next_num = current_num + 1
+                            
+                            next_page_buttons = driver.find_elements(By.XPATH, f"//a[text()='{next_num}']")
+                            if next_page_buttons:
+                                driver.execute_script("arguments[0].click();", next_page_buttons[0])
+                                self.status_callback(f"\n{next_num} 페이지로 이동합니다.")
+                                current_page = next_num
+                                time.sleep(3)
+                                
+                                if status_callback:
+                                    status_callback(f"\n{current_page} 페이지로 이동합니다.")
+                            else:
+                                self.status_callback("마지막 페이지에 도달하여 크롤링을 종료합니다.")
+                                break
+                        except:
+                            self.status_callback("다음 페이지를 찾을 수 없습니다. 마지막 페이지일 수 있습니다.")
+                            break
+                            
+                except (NoSuchElementException, TimeoutException) as e:
+                    self.status_callback(f"페이지네이션 요소를 찾을 수 없습니다: {e}")
+                    self.status_callback("마지막 페이지에 도달하여 크롤링을 종료합니다.")
+                    break
+                except Exception as e:
+                    self.status_callback(f"다음 페이지 이동 중 오류 발생: {e}")
+                    # 오류 발생시 스크린샷 저장 (디버깅용)
+                    try:
+                        driver.save_screenshot(f"error_page_{current_page}.png")
+                        self.status_callback(f"오류 스크린샷 저장: error_page_{current_page}.png")
+                    except:
+                        pass
+                    break
+
+            self.status_callback(f"\n크롤링 완료. 총 {collected_count}개의 정보를 수집했습니다.")
 
         except Exception as e:
-            self.status_callback(f"크롤링 프로세스 중 오류 발생: {str(e)}")
+            self.status_callback(f"크롤링 프로세스 중 심각한 오류 발생: {str(e)}")
         finally:
             if driver:
                 driver.quit()
-            self.callback(data)
+            self.root.after(0, self.callback, data)
 
     def stop(self):
         self.is_running = False
@@ -357,7 +551,7 @@ class CrawlerThread(threading.Thread):
 class NaverMapCrawlerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Naver Map Crawler v2.0")
+        self.root.title("Naver Map Crawler v2.0 - Final")
         self.root.geometry("700x300")
         
         # 스타일 설정
@@ -373,7 +567,7 @@ class NaverMapCrawlerApp:
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # 타이틀
-        title_label = ttk.Label(main_frame, text="네이버 지도 크롤러", style='Title.TLabel')
+        title_label = ttk.Label(main_frame, text="네이버 지도 크롤러 (최종버전)", style='Title.TLabel')
         title_label.grid(row=0, column=0, columnspan=3, pady=(0, 20))
         
         # 검색 영역
@@ -386,7 +580,7 @@ class NaverMapCrawlerApp:
         self.search_entry.bind('<Return>', lambda e: self.start_crawling())
         
         ttk.Label(search_frame, text="최대 갯수:").grid(row=0, column=2, padx=5)
-        self.max_count_var = tk.StringVar(value="10")
+        self.max_count_var = tk.StringVar(value="100")
         self.max_count_spinbox = ttk.Spinbox(search_frame, from_=1, to=500, textvariable=self.max_count_var, width=10)
         self.max_count_spinbox.grid(row=0, column=3, padx=5)
         
@@ -394,7 +588,7 @@ class NaverMapCrawlerApp:
         self.search_button.grid(row=0, column=4, padx=10)
         
         # 안내 메시지
-        info_text = "• 검색 결과를 엑셀 파일로 저장합니다.\n• 수집 항목: 장소명, 도로명 주소, 지번 주소, 전화번호\n• 최대 갯수를 조절하여 원하는 만큼만 수집할 수 있습니다."
+        info_text = "• 검색 결과를 엑셀 파일로 저장합니다.\n• 수집 항목: 장소명, 도로명 주소, 지번 주소, 전화번호\n• 최대 500개까지 수집 가능 (여러 페이지 자동 크롤링)\n• 전화번호 보기 버튼도 자동 처리됩니다."
         info_label = ttk.Label(main_frame, text=info_text, foreground='gray')
         info_label.grid(row=2, column=0, columnspan=3, pady=20)
         
@@ -404,7 +598,7 @@ class NaverMapCrawlerApp:
         self.status_bar.grid(row=3, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(20, 0))
         
         # By 라벨
-        by_label = ttk.Label(main_frame, text="By ANYCODER | v2.0", foreground='gray')
+        by_label = ttk.Label(main_frame, text="By ANYCODER | v2.0 Final", foreground='gray')
         by_label.grid(row=4, column=0, columnspan=3, pady=(10, 0))
         
     def start_crawling(self):
@@ -426,6 +620,7 @@ class NaverMapCrawlerApp:
         self.max_count_spinbox.config(state='disabled')
         
         self.crawler_thread = CrawlerThread(keyword, max_count, self.crawling_finished, self.update_status)
+        self.crawler_thread.root = self.root  # root 참조 추가
         self.crawler_thread.start()
         
     def update_status(self, message):
