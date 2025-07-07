@@ -3,7 +3,7 @@ name: Build EXE on Windows
 on:
   push:
     branches:
-      - main
+      - patch-1   # ← 네 브랜치명에 맞게!
   workflow_dispatch:
 
 jobs:
