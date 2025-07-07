@@ -14,6 +14,7 @@ import openpyxl
 import re
 from urllib.parse import quote
 
+
 class CrawlerThread(threading.Thread):
     def __init__(self, keyword, max_count, callback, status_callback):
         super().__init__()
