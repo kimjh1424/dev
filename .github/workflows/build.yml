@@ -1,18 +1,18 @@
-name: EXE
-on: workflow_dispatch
+name: Auto Build EXE
+on: 
+  push:
+    branches: [ main ]
 jobs:
   build:
     runs-on: windows-latest
     steps:
-    - run: |
-        echo 'import tkinter as tk
-        root = tk.Tk()
-        tk.Label(root, text="네이버 크롤러").pack()
-        tk.Button(root, text="시작").pack()
-        root.mainloop()' > demo.py
+    - uses: actions/checkout@v3
+    - name: Build EXE
+      run: |
+        echo 'print("Hello")' > demo.py
         pip install pyinstaller
         pyinstaller --onefile --windowed demo.py
     - uses: actions/upload-artifact@v3
       with:
-        name: exe
+        name: NaverCrawler
         path: dist/*.exe
