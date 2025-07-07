@@ -3,7 +3,7 @@ name: Build EXE on Windows
 on:
   push:
     branches:
-      - patch-1
+      - patch-1   # ← 네 브랜치명에 맞게!
   workflow_dispatch:
 
 jobs:
@@ -26,10 +26,10 @@ jobs:
 
     - name: Build EXE with PyInstaller
       run: |
-        pyinstaller --onefile --noconsole demo.py
+        pyinstaller --onefile --noconsole main.py
 
     - name: Upload EXE artifact
-      uses: actions/upload-artifact@v4   # ✅ 최신 버전!
+      uses: actions/upload-artifact@v3
       with:
-        name: demo-exe
-        path: dist/demo.exe
+        name: main-exe
+        path: dist/main.exe
