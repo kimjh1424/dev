@@ -232,9 +232,8 @@ class CrawlerThread(threading.Thread):
     def run(self):
         data = []
         collected_count = 0
-        self.status_callback(f"⚡ '{self.keyword}' 터보 크롤링 시작! (목표: {self.max_count}개)")
-        if self.max_count > 100:
-            self.status_callback("🚀 대량 크롤링 모드 활성화! 메모리 최적화 적용")
+        self.status_callback(f"🚀 '{self.keyword}' 크롤링 시작! (목표: {self.max_count}개)")
+        self.status_callback("💡 대량 수집 모드 - PC 사양에 최적화된 수집을 진행합니다")
         if self.headless_mode:
             self.status_callback("👻 헤드리스 모드로 실행중...")
         else:
@@ -271,17 +270,16 @@ class CrawlerThread(threading.Thread):
             options.add_argument("--disable-ipc-flooding-protection")
             
             # 대량 크롤링을 위한 추가 옵션
-            if self.max_count > 100:
-                options.add_argument("--disable-logging")
-                options.add_argument("--disable-gpu-sandbox")
-                options.add_argument("--disable-software-rasterizer")
-                options.add_argument("--disable-background-timer-throttling")
-                options.add_argument("--disable-backgrounding-occluded-windows")
-                options.add_argument("--disable-renderer-backgrounding")
-                options.add_argument("--disable-features=TranslateUI")
-                options.add_argument("--disable-ipc-flooding-protection")
-                # Chrome 메모리 사용량 제한
-                options.add_argument("--max_old_space_size=8192")  # 8GB까지 허용
+            options.add_argument("--disable-logging")
+            options.add_argument("--disable-gpu-sandbox")
+            options.add_argument("--disable-software-rasterizer")
+            options.add_argument("--disable-background-timer-throttling")
+            options.add_argument("--disable-backgrounding-occluded-windows")
+            options.add_argument("--disable-renderer-backgrounding")
+            options.add_argument("--disable-features=TranslateUI")
+            options.add_argument("--disable-ipc-flooding-protection")
+            # Chrome 메모리 사용량 제한
+            options.add_argument("--max_old_space_size=8192")  # 8GB까지 허용
             
             # 속도 개선 옵션
             options.add_argument("--disable-images")  # 이미지 로드 안함
@@ -334,7 +332,7 @@ class CrawlerThread(threading.Thread):
 
             while self.is_running and collected_count < self.max_count:
                 self.status_callback(f"\n{'='*50}")
-                self.status_callback(f"📌 {current_page} 페이지 터보 크롤링 시작")
+                self.status_callback(f"📌 {current_page} 페이지 크롤링 시작")
                 self.status_callback(f"📌 현재까지 수집: {collected_count}개")
                 self.status_callback(f"{'='*50}")
 
@@ -516,17 +514,50 @@ class CrawlerThread(threading.Thread):
                             except:
                                 pass
 
-                        # 전화번호 버튼 클릭 시도
+                        # 전화번호 버튼 클릭 시도 (재시도 로직 포함)
                         if phone == "정보 없음" or not any(char.isdigit() for char in phone):
-                            try:
-                                phone_button = driver.find_element(By.CSS_SELECTOR, "a.BfF3H")
-                                if "전화번호 보기" in phone_button.text:
-                                    driver.execute_script("arguments[0].click();", phone_button)
-                                    time.sleep(0.3)
-                                    phone_elem = driver.find_element(By.CSS_SELECTOR, ".J7eF_")
-                                    phone = phone_elem.text.replace("휴대전화번호", "").replace("복사", "").strip()
-                            except:
-                                pass
+                            max_retries = 5
+                            retry_count = 0
+                            
+                            while retry_count < max_retries and (phone == "정보 없음" or not any(char.isdigit() for char in phone)):
+                                try:
+                                    phone_button = driver.find_element(By.CSS_SELECTOR, "a.BfF3H")
+                                    if "전화번호 보기" in phone_button.text or "전화번호" in phone_button.text:
+                                        driver.execute_script("arguments[0].click();", phone_button)
+                                        time.sleep(0.5)  # 각 시도마다 0.5초 대기
+                                        
+                                        # 다양한 선택자로 전화번호 찾기
+                                        phone_selectors = [".J7eF_", ".xlx7Q", "._3ZA58 span", ".dry01", 
+                                                         "span[class*='phone']", "span[class*='tel']"]
+                                        
+                                        for selector in phone_selectors:
+                                            try:
+                                                phone_elem = driver.find_element(By.CSS_SELECTOR, selector)
+                                                temp_phone = phone_elem.text.replace("휴대전화번호", "").replace("복사", "").replace("안내", "").strip()
+                                                
+                                                # 전화번호 형식 확인 (숫자가 7개 이상 있는지)
+                                                if temp_phone and sum(c.isdigit() for c in temp_phone) >= 7:
+                                                    phone = temp_phone
+                                                    break
+                                            except:
+                                                continue
+                                        
+                                        # 전화번호를 찾았으면 종료
+                                        if phone != "정보 없음" and any(char.isdigit() for char in phone):
+                                            if retry_count > 0:
+                                                self.status_callback(f"📞 전화번호 {retry_count+1}번째 시도에서 성공!")
+                                            break
+                                            
+                                except Exception as e:
+                                    if retry_count == 0:
+                                        self.status_callback("📞 전화번호 로딩 재시도 중...")
+                                    pass
+                                
+                                retry_count += 1
+                                
+                            # 모든 시도 실패 시
+                            if retry_count >= max_retries and (phone == "정보 없음" or not any(char.isdigit() for char in phone)):
+                                self.status_callback("📞 전화번호 로드 실패 (일시적 오류)")
 
                         # 장소명
                         if name != "정보 없음":
@@ -545,6 +576,7 @@ class CrawlerThread(threading.Thread):
                             if collected_count % 50 == 0:
                                 try:
                                     driver.execute_script("window.dispatchEvent(new Event('beforeunload'));")
+                                    self.status_callback(f"💾 메모리 정리 중... (현재 {collected_count}개)")
                                 except:
                                     pass
                         else:
@@ -553,9 +585,9 @@ class CrawlerThread(threading.Thread):
                     except Exception as e:
                         page_collected += 1
                         
-                        # 탭 크래시 감지
+                        # 탭 종료 감지
                         if "tab crashed" in str(e).lower() or "session" in str(e).lower():
-                            self.status_callback("🛑 Chrome 탭 크래시 감지!")
+                            self.status_callback("⚠️ 메모리 한계 도달")
                             self.status_callback(f"💾 현재까지 수집된 데이터: {collected_count}개")
                             self.is_running = False
                             break
@@ -610,15 +642,10 @@ class CrawlerThread(threading.Thread):
                     except:
                         pass
                 
-                # 100개 도달시 경고 및 중단 옵션
-                if collected_count >= 100 and collected_count < 110:
-                    self.status_callback("⚠️ 100개 도달! 안정성을 위해 곧 중단됩니다...")
-                
-                # 110개에서 자동 중단 (크래시 방지)
-                if collected_count >= 110:
-                    self.status_callback("🛑 110개 도달! 크래시 방지를 위해 중단합니다.")
-                    self.status_callback("💡 나머지는 새로운 검색으로 계속하세요.")
-                    break
+                # 100개마다 상태 확인 (제한 해제 - 안내만 표시)
+                if collected_count > 0 and collected_count % 100 == 0:
+                    self.status_callback(f"✅ {collected_count}개 수집 완료! 계속 진행합니다...")
+                    self.status_callback(f"🚀 목표: {self.max_count}개까지 계속!")
                 
                 if collected_count >= self.max_count:
                     self.status_callback(f"✅ 목표 달성! {collected_count}개 수집 완료!")
@@ -647,13 +674,14 @@ class CrawlerThread(threading.Thread):
                     self.status_callback("❌ 수집률이 낮아 종료합니다.")
                     break
 
-            self.status_callback(f"\n🎉 터보 크롤링 완료!\n총 {collected_count}개 수집 ({current_page}페이지)")
+            self.status_callback(f"\n🎉 크롤링 완료!\n총 {collected_count}개 수집 ({current_page}페이지)")
 
         except Exception as e:
             error_msg = str(e)
             if "tab crashed" in error_msg.lower():
-                self.status_callback("🛑 Chrome 탭 크래시! 메모리 부족으로 인한 중단")
-                self.status_callback(f"💡 팁: 100개 이하로 설정하거나 헤드리스 모드를 사용하세요")
+                self.status_callback("⚠️ 메모리 부족으로 인한 종료")
+                self.status_callback(f"💾 수집된 데이터: {collected_count}개")
+                self.status_callback(f"💡 팁: PC 사양에 따라 한 번에 수집 가능한 개수가 제한될 수 있습니다")
             else:
                 self.status_callback(f"❌ 크롤링 오류: {error_msg[:100]}...")  # 에러 메시지 일부만 표시
         finally:
@@ -672,7 +700,7 @@ class CrawlerThread(threading.Thread):
 class NaverMapCrawlerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Naver Map Turbo Crawler v3.3 - 대량 크롤링 지원")
+        self.root.title("Naver Map Crawler v4.0 - 대량 수집 버전")
         self.root.geometry("800x650")
         
         # 스타일 설정
@@ -694,11 +722,11 @@ class NaverMapCrawlerApp:
         main_frame.grid_rowconfigure(6, weight=1)  # 로그 프레임 row 조정
         
         # 타이틀
-        title_label = ttk.Label(main_frame, text="⚡ 네이버 지도 터보 크롤러 v3.3", style='Title.TLabel')
+        title_label = ttk.Label(main_frame, text="🚀 네이버 지도 크롤러 v4.0", style='Title.TLabel')
         title_label.grid(row=0, column=0, columnspan=3, pady=(0, 5))
         
         # 부제목
-        subtitle_label = ttk.Label(main_frame, text="500개+ 대량 크롤링 & 지번주소 지원", style='Turbo.TLabel')
+        subtitle_label = ttk.Label(main_frame, text="대량 데이터 수집 지원", style='Turbo.TLabel')
         subtitle_label.grid(row=1, column=0, columnspan=3, pady=(0, 10))
         
         # 검색 영역
@@ -711,22 +739,22 @@ class NaverMapCrawlerApp:
         self.search_entry.bind('<Return>', lambda e: self.start_crawling())
         
         ttk.Label(search_frame, text="최대 갯수:").grid(row=0, column=2, padx=5)
-        self.max_count_var = tk.StringVar(value="100")
+        self.max_count_var = tk.StringVar(value="300")
         self.max_count_spinbox = ttk.Spinbox(search_frame, from_=1, to=1000, textvariable=self.max_count_var, width=10)
         self.max_count_spinbox.grid(row=0, column=3, padx=5)
         
-        self.search_button = ttk.Button(search_frame, text="⚡ 터보 시작", command=self.start_crawling)
+        self.search_button = ttk.Button(search_frame, text="🚀 크롤링 시작", command=self.start_crawling)
         self.search_button.grid(row=0, column=4, padx=10)
         
         # 옵션 프레임
-        option_frame = ttk.LabelFrame(main_frame, text="⚙️ 터보 옵션", padding="5")
+        option_frame = ttk.LabelFrame(main_frame, text="⚙️ 크롤링 옵션", padding="5")
         option_frame.grid(row=3, column=0, columnspan=3, pady=10, sticky=(tk.W, tk.E))
         
         # 헤드리스 모드 체크박스
         self.headless_var = tk.BooleanVar(value=False)
         self.headless_checkbox = ttk.Checkbutton(
             option_frame,
-            text="👻 헤드리스 모드 (브라우저 숨김 - 더 빠름)",
+            text="👻 헤드리스 모드 (브라우저 숨김 - 메모리 절약)",
             variable=self.headless_var
         )
         self.headless_checkbox.grid(row=0, column=0, padx=10, pady=5)
@@ -734,19 +762,19 @@ class NaverMapCrawlerApp:
         # 모드 설명
         mode_info = tk.Label(
             option_frame, 
-            text="• 일반 모드: 브라우저 표시 (진행 상황 확인 가능)\n• 헤드리스 모드: 브라우저 숨김 (더 빠른 속도)",
+            text="💡 안내사항\n• PC 사양에 따라 수집 가능한 개수가 다를 수 있습니다\n• 안정적인 수집을 위해 100개 단위로 나누어 진행하는 것을 권장합니다",
             justify=tk.LEFT,
-            fg='gray'
+            fg='blue'
         )
         mode_info.grid(row=1, column=0, padx=10, pady=5)
         
         # 안내 메시지
-        info_text = "• 터보 스크롤로 빠른 수집 (최대 1000개)\n• 수집 항목: 장소명, 도로명 주소, 지번 주소, 전화번호\n• 100개마다 메모리 자동 정리"
+        info_text = "• 대량 데이터 수집 가능\n• 수집 항목: 장소명, 도로명 주소, 지번 주소, 전화번호\n• PC 사양에 따라 최적의 수집 개수가 다를 수 있습니다"
         info_label = ttk.Label(main_frame, text=info_text, foreground='gray')
         info_label.grid(row=5, column=0, columnspan=3, pady=5)
         
         # 로그 프레임
-        log_frame = ttk.LabelFrame(main_frame, text="⚡ 터보 로그", padding="5")
+        log_frame = ttk.LabelFrame(main_frame, text="📋 크롤링 로그", padding="5")
         log_frame.grid(row=6, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=10)
         log_frame.grid_rowconfigure(0, weight=1)
         log_frame.grid_columnconfigure(0, weight=1)
@@ -778,12 +806,12 @@ class NaverMapCrawlerApp:
         self.log_text.tag_configure("turbo", foreground="#ff6b00", font=('Consolas', 10, 'bold'))
         
         # 상태바
-        self.status_var = tk.StringVar(value="⚡ TURBO READY")
+        self.status_var = tk.StringVar(value="🚀 준비 완료")
         self.status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN)
         self.status_bar.grid(row=7, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(5, 0))
         
         # By 라벨
-        by_label = ttk.Label(main_frame, text="By ANYCODER | v3.3 - 대량 크롤링 Edition", foreground='#ff6b00')
+        by_label = ttk.Label(main_frame, text="By ANYCODER | v4.0 - 대량 수집", foreground='#ff6b00')
         by_label.grid(row=8, column=0, columnspan=3, pady=(5, 0))
 
     def start_crawling(self):
@@ -800,23 +828,27 @@ class NaverMapCrawlerApp:
             messagebox.showwarning("입력 오류", "올바른 숫자를 입력해주세요.")
             return
             
-        # 대량 크롤링 경고
-        if max_count > 100:
+        # 대량 크롤링 안내
+        if max_count > 200:
             result = messagebox.askyesno(
-                "대량 크롤링 경고",
+                "대량 크롤링 안내",
                 f"{max_count}개 크롤링을 시작합니다.\n\n"
+                "💡 안내사항:\n"
+                "• PC 사양에 따라 처리 시간이 다를 수 있습니다\n"
                 "• 메모리 사용량이 증가할 수 있습니다\n"
-                "• 헤드리스 모드 사용을 권장합니다\n"
-                "• 크래시 발생시 데이터는 저장됩니다\n\n"
+                "• 수집된 데이터는 자동으로 저장됩니다\n\n"
                 "계속하시겠습니까?"
             )
             if not result:
                 return
             
-        self.search_button.config(state='disabled', text="⚡ 터보 진행중...")
+        self.search_button.config(state='disabled', text="🚀 크롤링 진행중...")
         self.search_entry.config(state='disabled')
         self.max_count_spinbox.config(state='disabled')
         self.headless_checkbox.config(state='disabled')
+        
+        # 로그 초기화
+        self.log_text.delete(1.0, tk.END)
         
         # 헤드리스 모드 옵션 전달
         headless_mode = self.headless_var.get()
@@ -839,13 +871,13 @@ class NaverMapCrawlerApp:
         
         # 메시지 타입에 따라 색상 적용
         tag = "info"
-        if "⚡" in message or "터보" in message:
+        if "⚡" in message or "🚀" in message:
             tag = "turbo"
         elif "✅" in message or "완료" in message:
             tag = "success"
         elif "경고" in message or "⚠️" in message:
             tag = "warning"
-        elif "오류" in message or "실패" in message or "❌" in message:
+        elif "오류" in message or "실패" in message or "❌" in message or "🛑" in message:
             tag = "error"
         
         # 로그 텍스트에 추가
@@ -854,13 +886,13 @@ class NaverMapCrawlerApp:
         self.root.update_idletasks()
         
     def crawling_finished(self, data):
-        self.search_button.config(state='normal', text="⚡ 터보 시작")
+        self.search_button.config(state='normal', text="🚀 크롤링 시작")
         self.search_entry.config(state='normal')
         self.max_count_spinbox.config(state='normal')
         self.headless_checkbox.config(state='normal')
         
         if data:
-            self.status_var.set(f"⚡ 터보 크롤링 완료! {len(data)}개 수집!")
+            self.status_var.set(f"🚀 크롤링 완료! {len(data)}개 수집!")
             self.save_to_excel(data)
         else:
             messagebox.showinfo("결과 없음", "수집된 데이터가 없습니다.\n검색어를 확인하고 다시 시도해주세요.")
@@ -871,7 +903,7 @@ class NaverMapCrawlerApp:
             return
             
         keyword = self.search_entry.get().strip()
-        default_filename = f"터보_{keyword}_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
+        default_filename = f"네이버지도_{keyword}_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
         
         file_path = filedialog.asksaveasfilename(
             defaultextension=".xlsx",
@@ -883,7 +915,7 @@ class NaverMapCrawlerApp:
             try:
                 workbook = openpyxl.Workbook()
                 sheet = workbook.active
-                sheet.title = "터보 크롤링 결과"
+                sheet.title = "크롤링 결과"
                 
                 # 헤더
                 headers = ["번호", "장소명", "도로명 주소", "지번 주소", "전화번호"]
@@ -920,7 +952,7 @@ class NaverMapCrawlerApp:
                 
                 messagebox.showinfo(
                     "저장 완료",
-                    f"⚡ 터보 저장 완료!\n\n"
+                    f"🚀 저장 완료!\n\n"
                     f"파일: {file_path}\n"
                     f"수집 데이터: {len(data)}개"
                 )
