@@ -62,7 +62,7 @@ class CrawlerThread(threading.Thread):
         return None
 
     def scroll_to_load_all(self, driver, scroll_container):
-        """모든 아이템이 로드될 때까지 천천히 스크롤"""
+        """모든 아이템이 로드될 때까지 스크롤 - 70개 제한 제거"""
         from selenium.webdriver.common.action_chains import ActionChains
         from selenium.webdriver.common.keys import Keys
         
@@ -97,12 +97,12 @@ class CrawlerThread(threading.Thread):
         # 전체 스크롤 높이 확인
         total_height = driver.execute_script("return arguments[0].scrollHeight", scroll_container)
         current_position = 0
-        scroll_step = 300  # 한 번에 스크롤할 픽셀
+        scroll_step = 200  # 300에서 200으로 감소 (더 천천히 스크롤)
         
         stable_count = 0
         max_stable_count = 3  # 연속으로 변화가 없을 때 카운트
         
-        self.status_callback("천천히 스크롤하며 모든 아이템을 로드합니다...")
+        self.status_callback("스크롤하며 모든 아이템을 로드합니다...")
         
         # 메인 스크롤 루프
         while current_position < total_height and self.is_running:
@@ -119,12 +119,12 @@ class CrawlerThread(threading.Thread):
                 current_position += scroll_step
                 
                 # 스크롤 후 충분한 대기 시간
-                time.sleep(1.5)
+                time.sleep(2)  # 1.5초에서 2초로 증가
                 
                 # 10번 스크롤마다 더 긴 대기 시간
                 if current_position % (scroll_step * 10) == 0:
                     self.status_callback(f"로딩 대기중... (스크롤 위치: {current_position}/{total_height})")
-                    time.sleep(2)
+                    time.sleep(3)  # 2초에서 3초로 증가
                 
                 # 새로운 아이템 확인
                 current_items = driver.find_elements(By.CSS_SELECTOR, "a.place_bluelink")
@@ -148,10 +148,10 @@ class CrawlerThread(threading.Thread):
                 self.status_callback(f"스크롤 중 오류: {e}")
                 pass
         
-        # 추가 스크롤 - 끝까지 5번 더 시도
+        # 추가 스크롤 - 끝까지 10번 더 시도
         self.status_callback("추가 스크롤로 놓친 아이템 확인 중...")
         extra_scroll_count = 0
-        max_extra_scrolls = 5
+        max_extra_scrolls = 10
         
         while extra_scroll_count < max_extra_scrolls and self.is_running:
             try:
@@ -216,7 +216,9 @@ class CrawlerThread(threading.Thread):
         data = []
         collected_count = 0
         self.status_callback(f"'{self.keyword}' 검색을 시작합니다... (최대 {self.max_count}개 수집)")
+        self.status_callback("=" * 50)
         driver = None
+        search_url = None  # search_url 변수 초기화
 
         try:
             options = webdriver.ChromeOptions()
@@ -225,21 +227,53 @@ class CrawlerThread(threading.Thread):
             options.add_argument("--disable-blink-features=AutomationControlled")
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
             options.add_experimental_option('useAutomationExtension', False)
+            
+            # 메모리 및 안정성 개선 옵션 추가
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--disable-gpu")
+            options.add_argument("--disable-features=VizDisplayCompositor")
+            options.add_argument("--disable-web-security")
+            options.add_argument("--max_old_space_size=4096")
+            
+            # 페이지 로드 전략 설정
+            options.page_load_strategy = 'eager'  # 'normal' 대신 'eager' 사용
+            
             driver = webdriver.Chrome(options=options)
 
+            # 페이지 로드 대기 시간 증가
+            driver.set_page_load_timeout(30)
+            driver.implicitly_wait(10)
+            
             encoded_keyword = quote(self.keyword)
             search_url = f"https://map.naver.com/p/search/{encoded_keyword}"
+            self.status_callback(f"검색 URL: {search_url}")
             driver.get(search_url)
-            time.sleep(3)
+            time.sleep(4)  # 3초에서 4초로 증가
 
+            self.status_callback("searchIframe으로 전환 시도...")
             WebDriverWait(driver, 20).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "searchIframe")))
             time.sleep(2)
+            self.status_callback("searchIframe 전환 성공")
+            
+            # 초기 페이지 로드 확인
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "a.place_bluelink, li.UEzoS"))
+                )
+                self.status_callback("검색 결과 로드 확인")
+            except:
+                self.status_callback("검색 결과를 찾을 수 없습니다. 검색어를 확인해주세요.")
+                return
 
             current_page = 1
-            max_pages_to_check = 20 # Limit to prevent infinite loops on pagination issues
 
-            while self.is_running and collected_count < self.max_count and current_page <= max_pages_to_check:
+            while self.is_running and collected_count < self.max_count:
                 self.status_callback(f"\n===== {current_page} 페이지 크롤링 시작 =====")
+                
+                # 페이지별 변수 초기화
+                page_target_count = 0
+                page_collected = 0
 
                 # Scroll to load all elements on the current page
                 scroll_container = None
@@ -276,7 +310,12 @@ class CrawlerThread(threading.Thread):
                     scroll_container = driver.find_element(By.TAG_NAME, "body")
 
                 # 모든 아이템 로드
-                self.scroll_to_load_all(driver, scroll_container)
+                self.status_callback("페이지 스크롤 시작...")
+                loaded_count = self.scroll_to_load_all(driver, scroll_container)
+                self.status_callback(f"스크롤 완료. {loaded_count}개 아이템 로드됨")
+                
+                # 스크롤 후 잠시 대기
+                time.sleep(2)
 
                 # Get all place elements on the current page after scrolling
                 all_place_elements = []
@@ -289,12 +328,15 @@ class CrawlerThread(threading.Thread):
                     "a[class*='place_bluelink']"  # 부분 매칭
                 ]
                 
+                used_selector = None  # 어떤 선택자를 사용했는지 저장
+                
                 for selector in place_selectors:
                     try:
                         all_place_elements = WebDriverWait(driver, 5).until(
                             EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector))
                         )
                         if all_place_elements:
+                            used_selector = selector
                             self.status_callback(f"장소 요소 찾음: {selector} ({len(all_place_elements)}개)")
                             break
                     except TimeoutException:
@@ -304,17 +346,30 @@ class CrawlerThread(threading.Thread):
                 
                 if not all_place_elements:
                     self.status_callback(f"{current_page} 페이지에서 장소를 찾을 수 없습니다.")
-                    # If no elements found, try to move to next page
-                    pass
 
                 if not all_place_elements:
-                    self.status_callback(f"{current_page} 페이지에 크롤링할 장소가 없습니다. 다음 페이지로 이동 시도.")
-                    pass_to_next_page = True
-                else:
-                    pass_to_next_page = False
-                    self.status_callback(f"{current_page} 페이지에서 총 {len(all_place_elements)}개의 장소를 찾았습니다.")
+                    self.status_callback(f"{current_page} 페이지에서 장소를 찾을 수 없습니다.")
+                    # 재시도
+                    time.sleep(3)
+                    if used_selector:
+                        all_place_elements = driver.find_elements(By.CSS_SELECTOR, used_selector)
+                    else:
+                        all_place_elements = driver.find_elements(By.CSS_SELECTOR, "a.place_bluelink")
+                    
+                    if not all_place_elements:
+                        self.status_callback("재시도 후에도 장소를 찾을 수 없습니다.")
+                        break  # 크롤링 종료
+
+                # 장소를 찾은 경우에만 크롤링 진행
+                if all_place_elements:
+                    # 이 페이지에서 크롤링해야 할 목표 개수 설정
+                    page_target_count = len(all_place_elements)
+                    self.status_callback(f"{current_page} 페이지에서 총 {page_target_count}개의 장소를 찾았습니다.")
+                    self.status_callback(f"이 페이지 목표: {page_target_count}개 크롤링")
 
                     # Iterate through each place element and crawl its details
+                    self.status_callback(f"크롤링 시작...")
+                    
                     for i, element in enumerate(all_place_elements):
                         if not self.is_running or collected_count >= self.max_count:
                             break
@@ -344,13 +399,15 @@ class CrawlerThread(threading.Thread):
                             time.sleep(2)
 
                             driver.switch_to.default_content()
+                            self.status_callback("entryIframe으로 전환 시도...")
                             WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "entryIframe")))
                             time.sleep(1)
+                            self.status_callback("entryIframe 전환 성공")
 
                             name, road_address, jibun_address, phone = "정보 없음", "정보 없음", "정보 없음", "정보 없음"
 
                             # 장소명 - 여러 선택자 시도
-                            name_selectors = [".YwYLL", "._3Apjo", ".GHAhO", "h2", "[class*='title']"]
+                            name_selectors = [".YwYLL", "._3Apjo", ".GHAhO", "h2", "[class*='title']", "span.place_name"]
                             for selector in name_selectors:
                                 try:
                                     name_elem = WebDriverWait(driver, 3).until(
@@ -358,6 +415,7 @@ class CrawlerThread(threading.Thread):
                                     )
                                     name = name_elem.text.strip().replace('복사', '').strip()
                                     if name and name != "정보 없음":
+                                        self.status_callback(f"장소명 찾음: {name} (선택자: {selector})")
                                         break
                                 except:
                                     continue
@@ -450,18 +508,32 @@ class CrawlerThread(threading.Thread):
                                 except Exception as e:
                                     self.status_callback(f"전화번호 보기 버튼 처리 중 오류: {e}")
 
+                            # 엑셀에 저장할 데이터 수집
                             if name != "정보 없음":
+                                self.status_callback(f"수집 정보: {name} / {road_address} / {jibun_address} / {phone}")
                                 data.append([name, road_address, jibun_address, phone])
                                 collected_count += 1
-                                self.status_callback(f"({collected_count}/{self.max_count}) {name} 정보 수집 완료")
+                                page_collected += 1
+                                self.status_callback(f"✅ ({collected_count}/{self.max_count}) {name} 정보 수집 완료 [페이지 진행률: {page_collected}/{page_target_count}]")
                             else:
-                                self.status_callback(f"장소 이름(YwYLL)을 찾을 수 없어 정보 수집 건너뜀.")
+                                self.status_callback(f"❌ 장소 이름을 찾을 수 없어 정보 수집 건너뜀.")
+                                # 이름을 못 찾아도 시도는 했으므로 카운트
+                                page_collected += 1
 
                         except StaleElementReferenceException:
                             self.status_callback(f"StaleElementReferenceException 발생. '{place_name_for_log}' 건너뜀")
+                            page_collected += 1  # 시도는 했으므로 카운트
                             continue
                         except Exception as e:
                             self.status_callback(f"장소 '{place_name_for_log}' 처리 중 오류: {str(e)}")
+                            page_collected += 1  # 시도는 했으므로 카운트
+                            
+                            # 탭 크래시 확인
+                            if "tab crashed" in str(e).lower() or "session" in str(e).lower():
+                                self.status_callback("Chrome 탭 크래시 감지! 크롤링을 종료합니다.")
+                                self.status_callback(f"현재까지 수집된 데이터: {collected_count}개")
+                                self.is_running = False  # 크롤링 종료 플래그
+                                break  # 내부 for 루프 종료
                             continue
                         finally:
                             # Always switch back to searchIframe for the next iteration
@@ -469,88 +541,163 @@ class CrawlerThread(threading.Thread):
                             WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "searchIframe")))
                             time.sleep(0.5)
 
+                    # 현재 페이지 크롤링 완료 체크
+                    if all_place_elements:  # 장소를 찾은 경우에만
+                        if page_collected > 0:
+                            self.status_callback(f"{current_page} 페이지 크롤링 완료! ({page_collected}/{page_target_count}개 수집)")
+                        else:
+                            self.status_callback(f"{current_page} 페이지에서 아무것도 수집하지 못했습니다.")
+                        
+                        # 목표 개수만큼 크롤링하지 못한 경우
+                        if page_collected < page_target_count:
+                            self.status_callback(f"경고: 목표 {page_target_count}개 중 {page_collected}개만 수집됨")
+
+                # 현재 페이지 상태 출력
+                self.status_callback(f"\n현재 상태: 총 {collected_count}개 수집 완료")
+                
+                # 메모리 정리 (50개마다)
+                if collected_count > 0 and collected_count % 50 == 0:
+                    self.status_callback("메모리 정리를 위해 잠시 대기...")
+                    time.sleep(3)
+                    try:
+                        # JavaScript로 메모리 정리
+                        driver.execute_script("if(typeof gc === 'function') { gc(); }")
+                    except:
+                        pass
+                
+                # 100개마다 드라이버 재시작 (메모리 누수 방지)
+                if collected_count > 0 and collected_count % 100 == 0 and collected_count < self.max_count:
+                    self.status_callback("안정성을 위해 브라우저를 재시작합니다...")
+                    try:
+                        driver.quit()
+                        time.sleep(2)
+                        
+                        # 드라이버 재생성
+                        options = webdriver.ChromeOptions()
+                        options.add_argument("--log-level=3")
+                        options.add_argument("--disable-blink-features=AutomationControlled")
+                        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+                        options.add_experimental_option('useAutomationExtension', False)
+                        options.add_argument("--no-sandbox")
+                        options.add_argument("--disable-dev-shm-usage")
+                        options.add_argument("--disable-gpu")
+                        options.add_argument("--disable-features=VizDisplayCompositor")
+                        options.add_argument("--disable-web-security")
+                        options.add_argument("--max_old_space_size=4096")
+                        options.page_load_strategy = 'eager'
+                        
+                        driver = webdriver.Chrome(options=options)
+                        driver.set_page_load_timeout(30)
+                        driver.implicitly_wait(10)
+                        
+                        # 검색 페이지로 다시 이동
+                        driver.get(search_url)
+                        time.sleep(3)
+                        WebDriverWait(driver, 20).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "searchIframe")))
+                        time.sleep(2)
+                        self.status_callback("브라우저 재시작 완료. 크롤링을 계속합니다.")
+                        
+                    except Exception as e:
+                        self.status_callback(f"브라우저 재시작 실패: {e}")
+                        break
+                
                 if collected_count >= self.max_count:
                     self.status_callback(f"목표 개수({self.max_count}개)를 모두 수집하여 크롤링을 종료합니다.")
                     break
 
-                # Move to the next page - 개선된 로직
+                # 현재 페이지의 목표를 달성했을 때만 다음 페이지로 이동
+                # 장소를 찾지 못한 경우 또는 90% 이상 크롤링했으면 다음 페이지로 이동 허용
+                if not all_place_elements or (page_target_count > 0 and page_collected >= page_target_count * 0.9):
+                    if all_place_elements and page_collected < page_target_count:
+                        self.status_callback(f"목표의 {int(page_collected/page_target_count*100)}%만 달성했지만 다음 페이지로 이동합니다.")
+                    elif all_place_elements:
+                        self.status_callback("현재 페이지 크롤링 100% 완료. 다음 페이지로 이동 시도...")
+                    else:
+                        self.status_callback("장소를 찾지 못해 다음 페이지로 이동 시도...")
+                else:
+                    self.status_callback(f"목표 개수의 {int(page_collected/page_target_count*100) if page_target_count > 0 else 0}%만 크롤링했습니다. ({page_collected}/{page_target_count})")
+                    self.status_callback("크롤링 성공률이 너무 낮아 종료합니다.")
+                    break
+
+                # Move to the next page - 목표 달성 시에만 실행
                 try:
+                    # 페이지 이동 전 메모리 정리
+                    self.status_callback("페이지 이동 준비 중...")
+                    time.sleep(1)
+                    
                     driver.switch_to.default_content()
                     WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "searchIframe")))
+                    time.sleep(0.5)
                     
-                    # 페이지네이션 컨테이너로 스크롤
+                    # 페이지네이션 영역으로 스크롤
                     try:
-                        pagination_container = WebDriverWait(driver, 5).until(
-                            EC.presence_of_element_located((By.CSS_SELECTOR, "div.zRM9F"))
-                        )
-                        driver.execute_script("arguments[0].scrollIntoView(true);", pagination_container)
+                        pagination = driver.find_element(By.CSS_SELECTOR, "div.zRM9F")
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", pagination)
                         time.sleep(0.5)
                     except:
-                        self.status_callback("페이지네이션 컨테이너를 찾을 수 없음")
+                        pass
                     
-                    # 다음 페이지 버튼 찾기
+                    # 다음 버튼 클릭 시도
+                    try:
+                        # 방법 1: 모든 페이지네이션 링크에서 다음 버튼 찾기
+                        all_links = driver.find_elements(By.CSS_SELECTOR, "div.zRM9F a")
+                        
+                        # 마지막 링크가 다음 버튼일 가능성이 높음
+                        if all_links:
+                            last_link = all_links[-1]
+                            # SVG 확인
+                            try:
+                                svg = last_link.find_element(By.TAG_NAME, "svg")
+                                if last_link.get_attribute("aria-disabled") != "true":
+                                    driver.execute_script("arguments[0].click();", last_link)
+                                    self.status_callback(f"\n{current_page + 1} 페이지로 이동합니다.")
+                                    current_page += 1
+                                    time.sleep(3)
+                                    continue
+                            except:
+                                pass
+                        
+                        # 방법 2: 하드코딩된 셀렉터
+                        next_button = driver.find_element(By.CSS_SELECTOR, "#app-root > div > div.XUrfU > div.zRM9F > a:nth-child(7)")
+                        if next_button.get_attribute("aria-disabled") != "true":
+                            driver.execute_script("arguments[0].click();", next_button)
+                            self.status_callback(f"\n{current_page + 1} 페이지로 이동합니다.")
+                            current_page += 1
+                            time.sleep(3)
+                            continue
+                    except:
+                        pass
+                    
+                    # 방법 3: 다음 페이지 버튼 찾기
                     next_button = self.find_next_page_button(driver)
-                    
                     if next_button:
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_button)
-                        time.sleep(0.3)
                         driver.execute_script("arguments[0].click();", next_button)
                         self.status_callback(f"\n{current_page + 1} 페이지로 이동합니다.")
                         current_page += 1
                         time.sleep(3)
-                        
-                        # 새 페이지 로드 확인
-                        try:
-                            WebDriverWait(driver, 5).until(
-                                lambda d: len(d.find_elements(By.CSS_SELECTOR, "a.place_bluelink")) > 0
-                            )
-                        except:
-                            self.status_callback("새 페이지 로드 대기 중...")
                     else:
-                        # 페이지 번호로 직접 이동 시도
-                        try:
-                            current_page_elem = driver.find_element(By.CSS_SELECTOR, "a[aria-current='true']")
-                            current_num = int(current_page_elem.text.strip())
-                            next_num = current_num + 1
-                            
-                            next_page_buttons = driver.find_elements(By.XPATH, f"//a[text()='{next_num}']")
-                            if next_page_buttons:
-                                driver.execute_script("arguments[0].click();", next_page_buttons[0])
-                                self.status_callback(f"\n{next_num} 페이지로 이동합니다.")
-                                current_page = next_num
-                                time.sleep(3)
-                                
-                                if status_callback:
-                                    status_callback(f"\n{current_page} 페이지로 이동합니다.")
-                            else:
-                                self.status_callback("마지막 페이지에 도달하여 크롤링을 종료합니다.")
-                                break
-                        except:
-                            self.status_callback("다음 페이지를 찾을 수 없습니다. 마지막 페이지일 수 있습니다.")
-                            break
-                            
-                except (NoSuchElementException, TimeoutException) as e:
-                    self.status_callback(f"페이지네이션 요소를 찾을 수 없습니다: {e}")
-                    self.status_callback("마지막 페이지에 도달하여 크롤링을 종료합니다.")
-                    break
+                        self.status_callback("더 이상 페이지가 없습니다. 크롤링을 종료합니다.")
+                        break
+                        
                 except Exception as e:
-                    self.status_callback(f"다음 페이지 이동 중 오류 발생: {e}")
-                    # 오류 발생시 스크린샷 저장 (디버깅용)
-                    try:
-                        driver.save_screenshot(f"error_page_{current_page}.png")
-                        self.status_callback(f"오류 스크린샷 저장: error_page_{current_page}.png")
-                    except:
-                        pass
+                    self.status_callback(f"페이지 이동 중 오류: {e}")
                     break
 
-            self.status_callback(f"\n크롤링 완료. 총 {collected_count}개의 정보를 수집했습니다.")
+            self.status_callback(f"\n크롤링 완료!\n총 {collected_count}개의 정보를 수집했습니다.\n총 {current_page}페이지를 크롤링했습니다.")
+            self.status_callback(f"수집된 데이터 개수: {len(data)}개")
 
         except Exception as e:
             self.status_callback(f"크롤링 프로세스 중 심각한 오류 발생: {str(e)}")
+            import traceback
+            self.status_callback(f"상세 오류: {traceback.format_exc()}")
         finally:
             if driver:
                 driver.quit()
-            self.root.after(0, self.callback, data)
+            self.status_callback(f"최종 수집 데이터: {len(data)}개")
+            if self.root:
+                self.root.after(0, self.callback, data)
+            else:
+                self.callback(data)
 
     def stop(self):
         self.is_running = False
@@ -559,7 +706,7 @@ class CrawlerThread(threading.Thread):
 class NaverMapCrawlerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Naver Map Crawler v2.0.1 - Final")
+        self.root.title("Naver Map Crawler v2.7.0 - Memory Optimized")
         self.root.geometry("700x300")
         
         # 스타일 설정
@@ -575,7 +722,7 @@ class NaverMapCrawlerApp:
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # 타이틀
-        title_label = ttk.Label(main_frame, text="네이버 지도 크롤러 (최종버전)", style='Title.TLabel')
+        title_label = ttk.Label(main_frame, text="네이버 지도 크롤러 v2.7.0", style='Title.TLabel')
         title_label.grid(row=0, column=0, columnspan=3, pady=(0, 20))
         
         # 검색 영역
@@ -596,7 +743,7 @@ class NaverMapCrawlerApp:
         self.search_button.grid(row=0, column=4, padx=10)
         
         # 안내 메시지
-        info_text = "• 검색 결과를 엑셀 파일로 저장합니다.\n• 수집 항목: 장소명, 도로명 주소, 지번 주소, 전화번호\n• 최대 500개까지 수집 가능 (여러 페이지 자동 크롤링)\n• 전화번호 보기 버튼도 자동 처리됩니다."
+        info_text = "• 검색 결과를 엑셀 파일로 저장합니다.\n• 수집 항목: 장소명, 도로명 주소, 지번 주소, 전화번호\n• 최대 500개까지 수집 가능 (여러 페이지 자동 크롤링)\n• 메모리 최적화로 안정성 향상"
         info_label = ttk.Label(main_frame, text=info_text, foreground='gray')
         info_label.grid(row=2, column=0, columnspan=3, pady=20)
         
@@ -606,7 +753,7 @@ class NaverMapCrawlerApp:
         self.status_bar.grid(row=3, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(20, 0))
         
         # By 라벨
-        by_label = ttk.Label(main_frame, text="By ANYCODER | v2.0.1 Final", foreground='gray')
+        by_label = ttk.Label(main_frame, text="By ANYCODER | v2.7.0 - Memory Optimized", foreground='gray')
         by_label.grid(row=4, column=0, columnspan=3, pady=(10, 0))
         
     def start_crawling(self):
