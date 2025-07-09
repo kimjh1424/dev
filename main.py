@@ -108,36 +108,7 @@ class CrawlerThread(threading.Thread):
         
         return driver
 
-    def find_next_page_button(self, driver):
-        """다음 페이지 버튼을 정확히 찾는 함수"""
-        selectors = ["a.eUTV2", "a._2PoiJ", "a[class*='page']", "button[class*='next']"]
-        
-        for selector in selectors:
-            try:
-                buttons = driver.find_elements(By.CSS_SELECTOR, selector)
-                
-                for button in buttons:
-                    if button.get_attribute("aria-disabled") == "true":
-                        continue
-                    
-                    try:
-                        svg_element = button.find_element(By.TAG_NAME, "svg")
-                        path_element = svg_element.find_element(By.TAG_NAME, "path")
-                        d_attribute = path_element.get_attribute("d")
-                        
-                        if d_attribute and any(pattern in d_attribute for pattern in ["M12", "M14", "M10.524"]):
-                            if not any(pattern in d_attribute for pattern in ["M8", "M6", "M13.476"]):
-                                self.status_callback(f"다음 페이지 버튼 찾음: {selector}")
-                                return button
-                                
-                    except:
-                        button_text = button.text.strip()
-                        if "다음" in button_text or ">" in button_text:
-                            return button
-            except:
-                continue
-                
-        return None
+    
 
     def turbo_scroll_to_load_all(self, driver, scroll_container):
         """터보 스크롤 - 확실하게 70개 모두 로드"""
@@ -200,28 +171,61 @@ class CrawlerThread(threading.Thread):
         previous_count = len(initial_items)
         self.status_callback(f"초기 아이템: {previous_count}개")
         
-        # 메인 스크롤 전략 - 끝까지 스크롤을 반복
-        self.status_callback("⚡ 강화된 스크롤 시작...")
-        no_change_count = 0
-        max_no_change = 5  # 5번 연속 변화 없으면 종료
+        # 점진적 스크롤 전략 - 천천히 단계별로 스크롤
+        self.status_callback("⚡ 점진적 스크롤 시작...")
+        total_scroll_attempts = 0
+        reached_bottom = False
+        bottom_extra_attempts = 0
         
-        for i in range(20):  # 최대 20번 시도로 증가
+        # 전체 스크롤 높이 확인
+        total_height = driver.execute_script("return arguments[0].scrollHeight", scroll_container)
+        current_position = 0
+        step_size = 300  # 한 번에 300px씩 스크롤
+        
+        while total_scroll_attempts < 40:  # 최대 40번 시도
+            total_scroll_attempts += 1
             try:
-                # 1. JavaScript로 끝까지 스크롤
-                driver.execute_script("""
-                    var element = arguments[0];
-                    element.scrollTop = element.scrollHeight;
-                """, scroll_container)
-                
-                time.sleep(0.8)  # 로드 대기 시간 증가
-                
-                # 2. 추가로 조금씩 더 스크롤 (남은 요소 로드)
-                for _ in range(3):
-                    driver.execute_script("""
+                # 끝에 도달했는지 확인
+                if current_position >= total_height:
+                    if not reached_bottom:
+                        reached_bottom = True
+                        self.status_callback(f"📍 [{total_scroll_attempts}번째] 스크롤 끝 도달! 추가 5회 시도 시작...")
+                    
+                    # 끝에서 5번 더 시도
+                    if bottom_extra_attempts < 5:
+                        bottom_extra_attempts += 1
+                        self.status_callback(f"🔽 [{total_scroll_attempts}번째] 끝에서 추가 시도 {bottom_extra_attempts}/5")
+                        
+                        # 강제로 더 아래로 스크롤
+                        driver.execute_script("""
+                            var element = arguments[0];
+                            element.scrollTop = element.scrollHeight + 500;
+                        """, scroll_container)
+                        time.sleep(0.8)
+                        
+                        # 높이 재확인
+                        new_height = driver.execute_script("return arguments[0].scrollHeight", scroll_container)
+                        if new_height > total_height:
+                            total_height = new_height
+                            reached_bottom = False  # 새로운 콘텐츠 발견
+                            bottom_extra_attempts = 0
+                            self.status_callback(f"📏 새로운 콘텐츠 발견! 스크롤 높이: {total_height}px")
+                    else:
+                        # 5번 시도 후 종료
+                        self.status_callback(f"✅ 끝에서 5회 추가 시도 완료")
+                        break
+                else:
+                    # 점진적으로 스크롤
+                    current_position += step_size
+                    driver.execute_script(f"""
                         var element = arguments[0];
-                        element.scrollTop = element.scrollTop + 500;
+                        element.scrollTo({{
+                            top: {current_position},
+                            behavior: 'smooth'
+                        }});
                     """, scroll_container)
-                    time.sleep(0.3)
+                    
+                    time.sleep(0.5)  # 각 스크롤 후 대기
                 
                 # 현재 아이템 수 확인
                 current_items = driver.find_elements(By.CSS_SELECTOR, "a.place_bluelink")
@@ -231,49 +235,37 @@ class CrawlerThread(threading.Thread):
                 current_count = len(current_items)
                 
                 if current_count > previous_count:
-                    self.status_callback(f"⚡ {current_count}개 로드됨 (+{current_count - previous_count})")
+                    self.status_callback(f"⚡ [{total_scroll_attempts}번째 스크롤] {current_count}개 로드됨 (+{current_count - previous_count})")
                     previous_count = current_count
-                    no_change_count = 0  # 변화가 있으면 카운트 리셋
                     
-                    # 70개 도달시에도 추가 스크롤
+                    # 새로운 높이 확인 (동적 로딩)
+                    new_height = driver.execute_script("return arguments[0].scrollHeight", scroll_container)
+                    if new_height > total_height:
+                        total_height = new_height
+                        self.status_callback(f"📏 스크롤 높이 증가: {total_height}px")
+                    
+                    # 70개 도달해도 계속 진행 (급하게 끝으로 가지 않음)
                     if current_count >= 70:
-                        self.status_callback(f"✅ 70개 도달! 추가 확인 중...")
-                        # 70개 도달 후에도 5번 더 스크롤해서 확인
-                        for j in range(5):
-                            driver.execute_script("""
-                                var element = arguments[0];
-                                element.scrollTop = element.scrollHeight;
-                            """, scroll_container)
-                            time.sleep(0.5)
-                            
-                            # 더 로드되는지 확인
-                            extra_items = driver.find_elements(By.CSS_SELECTOR, "a.place_bluelink")
-                            if not extra_items:
-                                extra_items = driver.find_elements(By.CSS_SELECTOR, "li.UEzoS")
-                            
-                            if len(extra_items) > current_count:
-                                current_count = len(extra_items)
-                                self.status_callback(f"⚡ 추가 발견! 총 {current_count}개")
-                        break
-                else:
-                    no_change_count += 1
-                    if no_change_count >= max_no_change:
-                        self.status_callback(f"⚠️ {max_no_change}번 연속 변화 없음. 최종: {current_count}개")
-                        break
+                        self.status_callback(f"✅ 70개 도달! 하지만 끝까지 계속 스크롤...")
                     
             except Exception as e:
                 self.status_callback(f"스크롤 오류: {e}")
+                break
         
-        # 추가 스크롤 전략: 중간 위치들로 스크롤
-        if current_count < 70:
-            self.status_callback("🔄 추가 스크롤 전략 실행...")
+        # 추가 스크롤 전략: 혹시 놓친 중간 부분이 있는지 확인
+        if current_count < 70 and current_count > 20:
+            self.status_callback("🔄 중간 영역 재확인...")
             try:
-                total_height = driver.execute_script("return arguments[0].scrollHeight", scroll_container)
-                positions = [0.2, 0.4, 0.6, 0.8, 1.0]  # 20%, 40%, 60%, 80%, 100% 위치
-                
+                # 중간 위치들로 다시 스크롤
+                positions = [0.3, 0.5, 0.7, 0.9]
                 for pos in positions:
+                    total_scroll_attempts += 1
+                    scroll_pos = int(total_height * pos)
                     driver.execute_script(f"""
-                        arguments[0].scrollTop = {int(total_height * pos)};
+                        arguments[0].scrollTo({{
+                            top: {scroll_pos},
+                            behavior: 'smooth'
+                        }});
                     """, scroll_container)
                     time.sleep(0.5)
                     
@@ -285,7 +277,7 @@ class CrawlerThread(threading.Thread):
                     new_count = len(current_items)
                     if new_count > current_count:
                         current_count = new_count
-                        self.status_callback(f"⚡ 추가 스크롤로 {current_count}개 발견!")
+                        self.status_callback(f"⚡ [{total_scroll_attempts}번째] 중간 스크롤로 {current_count}개 발견!")
                         
             except:
                 pass
@@ -304,7 +296,7 @@ class CrawlerThread(threading.Thread):
             final_items = driver.find_elements(By.CSS_SELECTOR, "li.UEzoS")
         
         final_count = len(final_items)
-        self.status_callback(f"⚡ 스크롤 완료! 최종 로드: {final_count}개")
+        self.status_callback(f"⚡ 스크롤 완료! 최종 로드: {final_count}개 (총 {total_scroll_attempts}번 스크롤)")
         
         if final_count < 70 and final_count > 20:
             self.status_callback(f"⚠️ 70개 미만 로드됨. 해당 검색어의 결과가 {final_count}개일 수 있습니다.")
@@ -320,7 +312,7 @@ class CrawlerThread(threading.Thread):
             'keyword': self.keyword,
             'checkpoint_num': checkpoint_num,
             'total_collected': len(data),
-            'current_page': page_num,
+            'current_page': page_num,  # 이제 총 방문한 페이지 수를 저장
             'current_item_index': item_index,
             'timestamp': datetime.now().isoformat(),
             'data': data
@@ -335,7 +327,7 @@ class CrawlerThread(threading.Thread):
         excel_file = os.path.join(self.checkpoint_dir, f'checkpoint_{checkpoint_num}_{len(data)}개.xlsx')
         self.save_to_excel_internal(data, excel_file)
         
-        self.status_callback(f"💾 체크포인트 {checkpoint_num} 저장 완료! ({len(data)}개)")
+        self.status_callback(f"💾 체크포인트 {checkpoint_num} 저장 완료! ({len(data)}개, {page_num}페이지까지 완료)")
 
     def save_to_excel_internal(self, data, file_path):
         """내부용 엑셀 저장 함수"""
@@ -379,9 +371,9 @@ class CrawlerThread(threading.Thread):
     def run(self):
         data = []
         collected_count = 0
-        current_page = 1
         checkpoint_num = 0
-        
+        total_pages_visited = 0  # 총 방문한 페이지 수
+
         # 체크포인트에서 재개하는 경우
         if self.resume_from_checkpoint:
             self.status_callback(f"🔄 체크포인트에서 재개 중...")
@@ -390,354 +382,299 @@ class CrawlerThread(threading.Thread):
                     checkpoint_data = json.load(f)
                     data = checkpoint_data['data']
                     collected_count = len(data)
-                    current_page = checkpoint_data['current_page']
                     checkpoint_num = checkpoint_data['checkpoint_num']
                     self.checkpoint_dir = os.path.dirname(self.resume_from_checkpoint)
-                    self.status_callback(f"✅ 체크포인트 로드 완료! ({collected_count}개 기존 데이터)")
+                    total_pages_visited = checkpoint_data.get('current_page', 0) # current_page가 완료된 페이지 수
+                    self.status_callback(f"✅ 체크포인트 로드 완료! ({collected_count}개 기존 데이터, {total_pages_visited}페이지 완료)")
             except Exception as e:
                 self.status_callback(f"❌ 체크포인트 로드 실패: {e}")
                 return
-        
+
         self.status_callback(f"🚀 '{self.keyword}' 크롤링 시작! (목표: {self.max_count}개)")
-        self.status_callback("💡 체크포인트 모드 - 100개마다 자동 저장")
+        self.status_callback("💡 페이지 단위 세션 모드 - 한 페이지(최대 70개)마다 브라우저 재시작")
+        self.status_callback("💾 100개마다 자동 체크포인트 + 페이지 완료시 추가 저장")
         if self.headless_mode:
             self.status_callback("👻 헤드리스 모드로 실행중...")
         else:
             self.status_callback("👀 일반 모드로 실행중 (브라우저 표시)")
         self.status_callback("=" * 50)
-        
+
         driver = None
-        search_url = None
 
         try:
-            # 100개 단위로 세션 분할
+            # 페이지 단위로 세션 관리
             while collected_count < self.max_count and self.is_running:
-                # 일시정지 확인
                 while self.is_paused and self.is_running:
                     time.sleep(0.5)
-                
+
                 if not self.is_running:
                     break
-                
-                # 세션당 최대 수집 개수 (100개 또는 남은 개수)
-                session_max = min(100, self.max_count - collected_count)
-                session_collected = 0
-                
+
                 self.session_count += 1
                 self.status_callback(f"\n{'='*50}")
-                self.status_callback(f"🔄 세션 {self.session_count} 시작 (목표: {session_max}개)")
+                self.status_callback(f"🔄 세션 {self.session_count} 시작 - {total_pages_visited + 1}번째 페이지 크롤링")
                 self.status_callback(f"🔧 봇 감지 회피를 위한 새 브라우저 프로필 생성...")
                 self.status_callback(f"{'='*50}")
-                
-                # 세션 간 대기 시간 (봇 감지 회피)
+
                 if self.session_count > 1:
                     wait_time = random.randint(5, 10)
                     self.status_callback(f"⏳ 네이버 봇 감지 회피를 위해 {wait_time}초 대기...")
                     for i in range(wait_time):
-                        if not self.is_running:
-                            break
+                        if not self.is_running: break
                         time.sleep(1)
                         self.status_callback(f"⏳ 대기 중... {wait_time - i - 1}초")
-                
-                # 강화된 드라이버 생성
+
                 driver = self.create_stealth_driver()
-                
                 encoded_keyword = quote(self.keyword)
                 search_url = f"https://map.naver.com/p/search/{encoded_keyword}"
                 self.status_callback(f"검색 URL: {search_url}")
-                
-                # 페이지 로드 전 대기 (랜덤)
+
                 time.sleep(random.uniform(2, 4))
-                
                 driver.get(search_url)
-                time.sleep(random.uniform(3, 5))  # 초기 로드 대기 랜덤화
+                time.sleep(random.uniform(3, 5))
 
                 self.status_callback("searchIframe으로 전환...")
                 WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "searchIframe")))
                 time.sleep(random.uniform(1, 2))
                 self.status_callback("✅ searchIframe 전환 성공")
-                
-                # 초기 페이지 로드 확인
+
                 try:
-                    WebDriverWait(driver, 10).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, "a.place_bluelink, li.UEzoS"))
-                    )
+                    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "a.place_bluelink, li.UEzoS")))
                     self.status_callback("✅ 검색 결과 로드 확인")
+                    time.sleep(2)
                 except:
                     self.status_callback("❌ 검색 결과를 찾을 수 없습니다.")
                     if driver:
                         driver.quit()
-                        if hasattr(driver, 'temp_profile'):
-                            shutil.rmtree(driver.temp_profile, ignore_errors=True)
+                        if hasattr(driver, 'temp_profile'): shutil.rmtree(driver.temp_profile, ignore_errors=True)
                     continue
 
-                # 지정된 페이지로 이동 (재개하는 경우)
-                if current_page > 1 and self.resume_from_checkpoint:
-                    self.status_callback(f"📌 {current_page} 페이지로 이동 중...")
-                    for _ in range(current_page - 1):
-                        next_button = self.find_next_page_button(driver)
-                        if next_button:
-                            driver.execute_script("arguments[0].click();", next_button)
-                            time.sleep(2)
-                        else:
-                            break
-                    self.resume_from_checkpoint = None  # 한 번만 실행
-
-                # 세션 내에서 크롤링
-                while session_collected < session_max and self.is_running:
-                    # 일시정지 확인
-                    while self.is_paused and self.is_running:
-                        time.sleep(0.5)
-                    
-                    if not self.is_running:
-                        break
-                    
-                    self.status_callback(f"\n{'='*50}")
-                    self.status_callback(f"📌 {current_page} 페이지 크롤링 시작")
-                    self.status_callback(f"📌 현재까지 수집: {collected_count}개 (세션 {self.session_count}: {session_collected}개)")
-                    self.status_callback(f"{'='*50}")
-
-                    # 터보 스크롤로 모든 아이템 로드
-                    loaded_count = self.turbo_scroll_to_load_all(driver, None)
-                    
-                    # 모든 장소 요소 가져오기
-                    all_place_elements = []
-                    place_selectors = ["a.place_bluelink", "li.UEzoS.rTjJo", "li.UEzoS"]
-                    
-                    for selector in place_selectors:
-                        try:
-                            all_place_elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                            if all_place_elements:
-                                self.status_callback(f"장소 요소 찾음: {selector} ({len(all_place_elements)}개)")
+                # --- START: New Pagination Logic ---
+                target_page = total_pages_visited + 1
+                if target_page > 1:
+                    self.status_callback(f"📌 {target_page}페이지로 이동 시작...")
+                    page_group_clicks = (target_page - 1) // 5
+                    if page_group_clicks > 0:
+                        self.status_callback(f"📖 페이지 그룹 이동 필요. '다음' 버튼 {page_group_clicks}번 클릭 시도.")
+                        for i in range(page_group_clicks):
+                            try:
+                                next_group_button = WebDriverWait(driver, 10).until(
+                                    EC.element_to_be_clickable((By.XPATH, "//a[contains(@class, 'eUTV2') and .//span[text()='다음']]"))
+                                )
+                                if next_group_button.get_attribute("aria-disabled") == "true":
+                                    self.status_callback(f"⚠️ '다음' 버튼이 비활성화되어 더 이상 이동할 수 없습니다. ({i+1}번째 시도)")
+                                    raise TimeoutException("Next group button disabled.")
+                                
+                                driver.execute_script("arguments[0].click();", next_group_button)
+                                self.status_callback(f"➡️ '다음' 버튼 클릭 ({i + 1}/{page_group_clicks})")
+                                time.sleep(random.uniform(1.5, 2.5))
+                            except TimeoutException as e:
+                                self.status_callback(f"❌ '다음' 버튼을 찾거나 클릭할 수 없습니다: {e}")
+                                self.is_running = False
                                 break
-                        except:
+                        if not self.is_running:
+                            if driver:
+                                driver.quit()
+                                if hasattr(driver, 'temp_profile'): shutil.rmtree(driver.temp_profile, ignore_errors=True)
                             continue
 
-                    if not all_place_elements:
-                        self.status_callback(f"❌ {current_page} 페이지에서 장소를 찾을 수 없습니다.")
-                        break
+                    try:
+                        page_button = WebDriverWait(driver, 10).until(
+                            EC.element_to_be_clickable((By.XPATH, f"//a[contains(@class, 'mBN2s') and text()='{target_page}']"))
+                        )
+                        driver.execute_script("arguments[0].click();", page_button)
+                        self.status_callback(f"✅ {target_page}페이지로 성공적으로 이동했습니다.")
+                        time.sleep(random.uniform(2, 3))
+                    except TimeoutException:
+                        self.status_callback(f"❌ {target_page}페이지 버튼을 찾을 수 없습니다. 마지막 페이지일 수 있습니다.")
+                        self.is_running = False
+                        if driver:
+                            driver.quit()
+                            if hasattr(driver, 'temp_profile'): shutil.rmtree(driver.temp_profile, ignore_errors=True)
+                        continue
+                # --- END: New Pagination Logic ---
 
-                    page_target_count = len(all_place_elements)
-                    page_collected = 0
-                    self.status_callback(f"⚡ {page_target_count}개 장소 크롤링 시작!")
+                self.status_callback(f"\n{'='*50}")
+                self.status_callback(f"📌 페이지 {total_pages_visited + 1} 크롤링 시작")
+                self.status_callback(f"📌 현재까지 총 수집: {collected_count}개")
+                self.status_callback(f"{'='*50}")
 
-                    # 각 장소 크롤링
-                    for i, element in enumerate(all_place_elements):
-                        if not self.is_running or session_collected >= session_max:
-                            break
-                        
-                        # 일시정지 확인
-                        while self.is_paused and self.is_running:
-                            time.sleep(0.5)
-
-                        try:
-                            # 요소 클릭
-                            if element.tag_name == 'a':
-                                element_to_click = element
-                            else:
-                                try:
-                                    element_to_click = element.find_element(By.CSS_SELECTOR, "a.place_bluelink")
-                                except:
-                                    element_to_click = element.find_element(By.CSS_SELECTOR, "a")
-
-                            # JavaScript 클릭 (더 빠름)
-                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element_to_click)
-                            time.sleep(random.uniform(0.3, 0.6))  # 랜덤 대기
-                            driver.execute_script("arguments[0].click();", element_to_click)
-                            time.sleep(random.uniform(1, 1.5))  # 랜덤 대기
-
-                            driver.switch_to.default_content()
-                            WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "entryIframe")))
-                            time.sleep(0.5)
-
-                            # 데이터 추출
-                            place_data = driver.execute_script("""
-                                var result = {
-                                    name: '',
-                                    roadAddr: '', 
-                                    jibunAddr: '',
-                                    phone: ''
-                                };
-                                
-                                // 이름
-                                var nameElem = document.querySelector('.YwYLL, ._3Apjo, .GHAhO, h2');
-                                if (nameElem) result.name = nameElem.textContent.replace('복사', '').trim();
-                                
-                                // 도로명 주소
-                                var roadElem = document.querySelector('.LDgIH');
-                                if (roadElem) result.roadAddr = roadElem.textContent.replace('복사', '').trim();
-                                
-                                // 전화번호
-                                var phoneElem = document.querySelector('.xlx7Q, ._3ZA58 span, .dry01, .J7eF_');
-                                if (phoneElem) {
-                                    result.phone = phoneElem.textContent
-                                        .replace('휴대전화번호', '')
-                                        .replace('복사', '')
-                                        .trim();
-                                }
-                                
-                                return result;
-                            """)
-
-                            name = place_data.get('name', '정보 없음')
-                            road_address = place_data.get('roadAddr', '정보 없음')
-                            jibun_address = "정보 없음"
-                            phone = place_data.get('phone', '정보 없음')
-                            
-                            # 지번주소 가져오기
-                            try:
-                                address_button = driver.find_element(By.CSS_SELECTOR, "a.PkgBl")
-                                driver.execute_script("arguments[0].click();", address_button)
-                                time.sleep(0.3)
-                                
-                                # 지번주소 찾기
-                                jibun_found = False
-                                
-                                try:
-                                    time.sleep(0.2)
-                                    address_items = driver.find_elements(By.CSS_SELECTOR, ".nQ7Lh")
-                                    for item in address_items:
-                                        item_text = item.text.strip()
-                                        if "지번" in item_text:
-                                            jibun_address = item_text.replace("지번", "").replace("복사", "").strip()
-                                            jibun_found = True
-                                            break
-                                except:
-                                    pass
-                                
-                                # 버튼 다시 클릭해서 닫기
-                                if jibun_found:
-                                    try:
-                                        close_button = driver.find_element(By.CSS_SELECTOR, "a.PkgBl[aria-expanded='true']")
-                                        driver.execute_script("arguments[0].click();", close_button)
-                                    except:
-                                        pass
-                                    
-                            except:
-                                pass
-
-                            # 전화번호 버튼 클릭 시도
-                            if phone == "정보 없음" or not any(char.isdigit() for char in phone):
-                                max_retries = 5
-                                retry_count = 0
-                                
-                                while retry_count < max_retries and (phone == "정보 없음" or not any(char.isdigit() for char in phone)):
-                                    try:
-                                        phone_button = driver.find_element(By.CSS_SELECTOR, "a.BfF3H")
-                                        if "전화번호 보기" in phone_button.text or "전화번호" in phone_button.text:
-                                            driver.execute_script("arguments[0].click();", phone_button)
-                                            time.sleep(0.5)
-                                            
-                                            phone_selectors = [".J7eF_", ".xlx7Q", "._3ZA58 span", ".dry01"]
-                                            
-                                            for selector in phone_selectors:
-                                                try:
-                                                    phone_elem = driver.find_element(By.CSS_SELECTOR, selector)
-                                                    temp_phone = phone_elem.text.replace("휴대전화번호", "").replace("복사", "").replace("안내", "").strip()
-                                                    
-                                                    if temp_phone and sum(c.isdigit() for c in temp_phone) >= 7:
-                                                        phone = temp_phone
-                                                        break
-                                                except:
-                                                    continue
-                                            
-                                            if phone != "정보 없음" and any(char.isdigit() for char in phone):
-                                                break
-                                                
-                                    except:
-                                        pass
-                                    
-                                    retry_count += 1
-
-                            # 데이터 저장
-                            if name != "정보 없음":
-                                data.append([name, road_address, jibun_address, phone])
-                                collected_count += 1
-                                session_collected += 1
-                                page_collected += 1
-                                
-                                # 진행 상황 로그
-                                if collected_count % 10 == 0:
-                                    self.status_callback(f"✅ ({collected_count}/{self.max_count}) 수집 진행중...")
-                                
-                                # 100개마다 자동 체크포인트
-                                if self.checkpoint_enabled and collected_count % 100 == 0:
-                                    checkpoint_num += 1
-                                    self.save_checkpoint(data, checkpoint_num, current_page, i)
-                                
-                                # 수동 체크포인트 확인
-                                if self.manual_checkpoint_flag:
-                                    checkpoint_num += 1
-                                    self.save_checkpoint(data, checkpoint_num, current_page, i)
-                                    self.manual_checkpoint_flag = False
-                                    self.status_callback("💾 수동 체크포인트 저장 완료!")
-                                
-                                # 목표 달성 확인
-                                if collected_count >= self.max_count:
-                                    break
-                            else:
-                                page_collected += 1
-
-                        except Exception as e:
-                            page_collected += 1
-                            continue
-                        finally:
-                            try:
-                                driver.switch_to.default_content()
-                                WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "searchIframe")))
-                                time.sleep(0.3)
-                            except:
-                                pass
-
-                    self.status_callback(f"⚡ {current_page} 페이지 완료! ({page_collected}/{page_target_count}개 수집)")
-                    
-                    # 세션 목표 달성 확인
-                    if session_collected >= session_max:
-                        break
-                    
-                    # 다음 페이지로 이동
-                    if page_collected >= page_target_count * 0.8:  # 80% 이상 수집시 다음 페이지
-                        try:
-                            driver.switch_to.default_content()
-                            WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "searchIframe")))
-                            
-                            next_button = self.find_next_page_button(driver)
-                            if next_button:
-                                driver.execute_script("arguments[0].click();", next_button)
-                                self.status_callback(f"⚡ 다음 페이지로 이동!")
-                                current_page += 1
-                                time.sleep(2)
-                            else:
-                                self.status_callback("❌ 마지막 페이지입니다.")
-                                break
-                                
-                        except Exception as e:
-                            self.status_callback(f"❌ 페이지 이동 실패: {e}")
-                            break
-                    elif page_target_count <= 20:
-                        # 페이지에 20개 이하만 있는 경우 다음 페이지로
-                        self.status_callback(f"📌 이 페이지는 {page_target_count}개만 있습니다. 다음 페이지로 이동합니다.")
-                        try:
-                            driver.switch_to.default_content()
-                            WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "searchIframe")))
-                            
-                            next_button = self.find_next_page_button(driver)
-                            if next_button:
-                                driver.execute_script("arguments[0].click();", next_button)
-                                current_page += 1
-                                time.sleep(2)
-                            else:
-                                self.status_callback("❌ 마지막 페이지입니다.")
-                                break
-                        except:
-                            break
-                    else:
-                        self.status_callback(f"❌ 수집률이 낮습니다. ({page_collected}/{page_target_count})")
-                        self.status_callback("🔍 스크롤이 충분하지 않았을 수 있습니다. 다음 세션에서 재시도합니다.")
-                        # 낮은 수집률이어도 계속 진행 (다음 세션에서 재시도)
-                        break
+                loaded_count = self.turbo_scroll_to_load_all(driver, None)
                 
-                # 드라이버 종료 및 프로필 삭제
+                all_place_elements = []
+                place_selectors = ["a.place_bluelink", "li.UEzoS.rTjJo", "li.UEzoS"]
+                for selector in place_selectors:
+                    try:
+                        all_place_elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                        if all_place_elements:
+                            self.status_callback(f"장소 요소 찾음: {selector} ({len(all_place_elements)}개)")
+                            break
+                    except: continue
+
+                if not all_place_elements:
+                    self.status_callback(f"❌ 페이지 {total_pages_visited + 1}에서 장소를 찾을 수 없습니다.")
+                    self.is_running = False
+                    if driver:
+                        driver.quit()
+                        if hasattr(driver, 'temp_profile'): shutil.rmtree(driver.temp_profile, ignore_errors=True)
+                    continue
+
+                page_target_count = len(all_place_elements)
+                page_collected = 0
+                self.status_callback(f"⚡ {page_target_count}개 장소 크롤링 시작!")
+
+                for i, element in enumerate(all_place_elements):
+                    if not self.is_running or collected_count >= self.max_count: break
+                    while self.is_paused and self.is_running: time.sleep(0.5)
+                    try:
+                        if element.tag_name == 'a':
+                            element_to_click = element
+                        else:
+                            try:
+                                element_to_click = element.find_element(By.CSS_SELECTOR, "a.place_bluelink")
+                            except:
+                                element_to_click = element.find_element(By.CSS_SELECTOR, "a")
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element_to_click)
+                        time.sleep(random.uniform(0.3, 0.6))
+                        driver.execute_script("arguments[0].click();", element_to_click)
+                        time.sleep(random.uniform(1, 1.5))
+                        driver.switch_to.default_content()
+                        WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "entryIframe")))
+                        time.sleep(0.5)
+                        place_data = driver.execute_script("var result = {name: '', roadAddr: '', jibunAddr: '', phone: ''}; var nameElem = document.querySelector('.YwYLL, ._3Apjo, .GHAhO, h2'); if (nameElem) result.name = nameElem.textContent.replace('복사', '').trim(); var roadElem = document.querySelector('.LDgIH'); if (roadElem) result.roadAddr = roadElem.textContent.replace('복사', '').trim(); var phoneElem = document.querySelector('.xlx7Q, ._3ZA58 span, .dry01, .J7eF_'); if (phoneElem) { result.phone = phoneElem.textContent.replace('휴대전화번호', '').replace('복사', '').trim(); } return result;")
+                        name = place_data.get('name', '정보 없음')
+                        road_address = place_data.get('roadAddr', '정보 없음')
+                        jibun_address = "정보 없음"
+                        phone = place_data.get('phone', '정보 없음')
+                        try:
+                            address_button = driver.find_element(By.CSS_SELECTOR, "a.PkgBl")
+                            driver.execute_script("arguments[0].click();", address_button)
+                            time.sleep(0.3)
+                            jibun_found = False
+                            try:
+                                time.sleep(0.2)
+                                address_items = driver.find_elements(By.CSS_SELECTOR, ".nQ7Lh")
+                                for item in address_items:
+                                    item_text = item.text.strip()
+                                    if "지번" in item_text:
+                                        jibun_address = item_text.replace("지번", "").replace("복사", "").strip()
+                                        jibun_found = True
+                                        break
+                            except: pass
+                            if jibun_found:
+                                try:
+                                    close_button = driver.find_element(By.CSS_SELECTOR, "a.PkgBl[aria-expanded='true']")
+                                    driver.execute_script("arguments[0].click();", close_button)
+                                except: pass
+                        except: pass
+                        if phone == "정보 없음" or not any(char.isdigit() for char in phone):
+                            max_retries = 10  # 5회에서 10회로 증가
+                            retry_count = 0
+                            while retry_count < max_retries and (phone == "정보 없음" or not any(char.isdigit() for char in phone)):
+                                retry_count += 1
+                                self.status_callback(f"📞 전화번호 가져오기 시도 {retry_count}/{max_retries}...")
+                                
+                                try:
+                                    phone_button = driver.find_element(By.CSS_SELECTOR, "a.BfF3H")
+                                    if "전화번호 보기" in phone_button.text or "전화번호" in phone_button.text:
+                                        driver.execute_script("arguments[0].click();", phone_button)
+                                        time.sleep(0.5)
+                                        
+                                        # 전화번호 찾기 시도
+                                        phone_selectors = [".J7eF_", ".xlx7Q", "._3ZA58 span", ".dry01"]
+                                        phone_found = False
+                                        
+                                        for selector in phone_selectors:
+                                            try:
+                                                phone_elem = driver.find_element(By.CSS_SELECTOR, selector)
+                                                temp_phone = phone_elem.text.replace("휴대전화번호", "").replace("복사", "").replace("안내", "").strip()
+                                                if temp_phone and sum(c.isdigit() for c in temp_phone) >= 7:
+                                                    phone = temp_phone
+                                                    phone_found = True
+                                                    self.status_callback(f"✅ 전화번호 찾기 성공: {phone}")
+                                                    break
+                                            except:
+                                                continue
+                                        
+                                        # 전화번호를 찾지 못한 경우 닫기 버튼 클릭
+                                        if not phone_found:
+                                            try:
+                                                # 일시적 오류 또는 전화번호가 없는 경우 닫기 버튼 클릭
+                                                close_button = driver.find_element(By.CSS_SELECTOR, "a.ce91Y")
+                                                driver.execute_script("arguments[0].click();", close_button)
+                                                self.status_callback(f"⚠️ 전화번호를 찾을 수 없음... 닫기 버튼 클릭 (시도 {retry_count}/{max_retries})")
+                                                time.sleep(0.3)  # 닫기 후 잠시 대기
+                                            except:
+                                                # 닫기 버튼을 찾을 수 없는 경우
+                                                self.status_callback(f"⚠️ 닫기 버튼을 찾을 수 없음 (시도 {retry_count}/{max_retries})")
+                                        
+                                        # 전화번호를 찾은 경우 루프 종료
+                                        if phone != "정보 없음" and any(char.isdigit() for char in phone):
+                                            break
+                                            
+                                except Exception as e:
+                                    self.status_callback(f"⚠️ 전화번호 버튼 클릭 실패 (시도 {retry_count}/{max_retries})")
+                                    
+                            # 10번 시도 후에도 실패한 경우
+                            if phone == "정보 없음" or not any(char.isdigit() for char in phone):
+                                self.status_callback(f"❌ 전화번호를 찾을 수 없습니다. {retry_count}번 시도 후 포기")
+                        if name != "정보 없음":
+                            data.append([name, road_address, jibun_address, phone])
+                            collected_count += 1
+                            page_collected += 1
+                            if collected_count % 10 == 0: self.status_callback(f"✅ ({collected_count}/{self.max_count}) 수집 진행중...")
+                            if self.checkpoint_enabled and collected_count % 100 == 0:
+                                checkpoint_num += 1
+                                self.save_checkpoint(data, checkpoint_num, total_pages_visited + 1, i)
+                            if self.manual_checkpoint_flag:
+                                checkpoint_num += 1
+                                self.save_checkpoint(data, checkpoint_num, total_pages_visited + 1, i)
+                                self.manual_checkpoint_flag = False
+                                self.status_callback("💾 수동 체크포인트 저장 완료!")
+                            if collected_count >= self.max_count: break
+                        else: page_collected += 1
+                    except Exception as e:
+                        page_collected += 1
+                        continue
+                    finally:
+                        try:
+                            driver.switch_to.default_content()
+                            WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "searchIframe")))
+                            time.sleep(0.3)
+                        except: pass
+
+                self.status_callback(f"⚡ 페이지 {total_pages_visited + 1} 완료! ({page_collected}/{page_target_count}개 수집)")
+                
+                if page_collected > 0:
+                    total_pages_visited += 1
+                    self.status_callback(f"✅ 총 {total_pages_visited}페이지 크롤링 완료")
+                    if self.checkpoint_enabled and page_collected >= 50:
+                        checkpoint_num += 1
+                        self.save_checkpoint(data, checkpoint_num, total_pages_visited, 0)
+                        self.status_callback(f"💾 페이지 {total_pages_visited} 체크포인트 저장")
+                
+                # --- START: New Stopping Condition Logic ---
+                try:
+                    next_group_button = driver.find_element(By.XPATH, "//a[contains(@class, 'eUTV2') and .//span[text()='다음']]")
+                    if next_group_button.get_attribute("aria-hidden") == "true" or next_group_button.get_attribute("aria-disabled") == "true":
+                        self.status_callback("✅ 마지막 페이지입니다. ('다음' 버튼 비활성화). 크롤링을 종료합니다.")
+                        self.is_running = False
+                except NoSuchElementException:
+                    try:
+                        next_page_link = total_pages_visited + 1
+                        driver.find_element(By.XPATH, f"//a[contains(@class, 'mBN2s') and text()='{next_page_link}']")
+                    except NoSuchElementException:
+                        self.status_callback("✅ 마지막 페이지입니다. (다음 페이지 번호 없음). 크롤링을 종료합니다.")
+                        self.is_running = False
+                # --- END: New Stopping Condition Logic ---
+
+                if page_collected < page_target_count * 0.8 and page_target_count > 20:
+                    self.status_callback(f"⚠️ 수집률 주의: {page_collected}/{page_target_count} ({int(page_collected/page_target_count*100)}%)")
+                
+                if collected_count >= self.max_count:
+                    self.status_callback(f"🎯 목표 달성! {collected_count}개 수집 완료")
+                    break
+                
                 if driver:
                     driver.quit()
                     if hasattr(driver, 'temp_profile'):
@@ -745,24 +682,21 @@ class CrawlerThread(threading.Thread):
                         self.status_callback("🧹 임시 브라우저 프로필 삭제 완료")
                     driver = None
                 
-                # 세션 완료 메시지
-                self.status_callback(f"\n✅ 세션 {self.session_count} 완료! ({session_collected}개 수집)")
+                self.status_callback(f"\n✅ 페이지 {total_pages_visited} 세션 완료! (이번 페이지: {page_collected}개)")
                 
-            self.status_callback(f"\n🎉 크롤링 완료!\n총 {collected_count}개 수집")
+            self.status_callback(f"\n🎉 크롤링 완료!\n총 {collected_count}개 수집 (총 {total_pages_visited}페이지)")
 
         except Exception as e:
             self.status_callback(f"❌ 크롤링 오류: {str(e)[:100]}...")
         finally:
             if driver:
                 driver.quit()
-                if hasattr(driver, 'temp_profile'):
-                    shutil.rmtree(driver.temp_profile, ignore_errors=True)
+                if hasattr(driver, 'temp_profile'): shutil.rmtree(driver.temp_profile, ignore_errors=True)
             
-            # 마지막 체크포인트 저장
             if self.checkpoint_enabled and len(data) > 0:
-                if len(data) % 100 != 0:  # 100개 단위가 아닌 경우에만
-                    checkpoint_num += 1
-                    self.save_checkpoint(data, checkpoint_num, current_page, 0)
+                checkpoint_num += 1
+                self.save_checkpoint(data, checkpoint_num, total_pages_visited, 0)
+                self.status_callback("💾 최종 체크포인트 저장 완료")
             
             self.status_callback(f"최종 수집 데이터: {len(data)}개")
             if self.root:
@@ -785,7 +719,7 @@ class CrawlerThread(threading.Thread):
 class NaverMapCrawlerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Naver Map Crawler v5.0 - 체크포인트 버전")
+        self.root.title("Naver Map Crawler v5.0 - 페이지 단위 세션")
         self.root.geometry("900x750")
         
         # 스타일 설정
@@ -811,7 +745,7 @@ class NaverMapCrawlerApp:
         title_label.grid(row=0, column=0, columnspan=3, pady=(0, 5))
         
         # 부제목
-        subtitle_label = ttk.Label(main_frame, text="체크포인트 자동 저장 지원", style='Turbo.TLabel')
+        subtitle_label = ttk.Label(main_frame, text="페이지 단위 세션 & 체크포인트", style='Turbo.TLabel')
         subtitle_label.grid(row=1, column=0, columnspan=3, pady=(0, 10))
         
         # 검색 영역
@@ -875,14 +809,14 @@ class NaverMapCrawlerApp:
         # 모드 설명
         mode_info = tk.Label(
             option_frame, 
-            text="💡 안내사항\n• 100개마다 자동으로 체크포인트가 생성됩니다\n• 네이버 봇 감지 회피를 위해 100개마다 새 브라우저 세션을 시작합니다\n• 체크포인트에서 이어서 크롤링이 가능합니다\n• 수동 체크포인트도 언제든 저장 가능합니다",
+            text="💡 안내사항\n• 한 페이지(최대 70개)를 완료할 때마다 브라우저를 재시작합니다\n• 네이버 봇 감지를 효과적으로 회피할 수 있습니다\n• 100개마다 자동 체크포인트 + 수동 저장 가능\n• 체크포인트에서 이어서 크롤링이 가능합니다",
             justify=tk.LEFT,
             fg='blue'
         )
         mode_info.grid(row=1, column=0, columnspan=2, padx=10, pady=5)
         
         # 안내 메시지
-        info_text = "• 체크포인트 자동 저장으로 안정적인 대량 수집\n• 네이버 봇 감지 회피 강화\n• 일시정지/재개 기능 지원"
+        info_text = "• 페이지 단위 세션으로 안정적인 대량 수집\n• 네이버 봇 감지 회피 강화 (페이지마다 브라우저 재시작)\n• 일시정지/재개 및 체크포인트 기능 지원"
         info_label = ttk.Label(main_frame, text=info_text, foreground='gray')
         info_label.grid(row=6, column=0, columnspan=3, pady=5)
         
@@ -924,7 +858,7 @@ class NaverMapCrawlerApp:
         self.status_bar.grid(row=8, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(5, 0))
         
         # By 라벨
-        by_label = ttk.Label(main_frame, text="By ANYCODER | v5.0 - 체크포인트", foreground='#ff6b00')
+        by_label = ttk.Label(main_frame, text="By ANYCODER | v5.0 - 페이지 단위 세션", foreground='#ff6b00')
         by_label.grid(row=9, column=0, columnspan=3, pady=(5, 0))
 
     def start_crawling(self, resume_checkpoint=None):
@@ -1020,7 +954,7 @@ class NaverMapCrawlerApp:
                 info_msg = f"체크포인트 정보:\n"
                 info_msg += f"검색어: {checkpoint_data['keyword']}\n"
                 info_msg += f"수집된 데이터: {checkpoint_data['total_collected']}개\n"
-                info_msg += f"현재 페이지: {checkpoint_data['current_page']}\n"
+                info_msg += f"완료한 페이지: {checkpoint_data['current_page']}페이지\n"
                 info_msg += f"저장 시간: {checkpoint_data['timestamp']}\n\n"
                 info_msg += "이어서 크롤링하시겠습니까?"
                 
@@ -1050,7 +984,7 @@ class NaverMapCrawlerApp:
             tag = "turbo"
         elif "✅" in message or "완료" in message:
             tag = "success"
-        elif "경고" in message or "⚠️" in message:
+        elif "경고" in message or "⚠️" in message or "📞" in message:
             tag = "warning"
         elif "오류" in message or "실패" in message or "❌" in message:
             tag = "error"
